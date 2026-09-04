@@ -708,13 +708,34 @@ export default function ExportMenuButton({
       );
       return;
     }
-    // Pré-remplit le nom d'exploitation du shapefile avec ce qui est déjà connu.
+    // Pré-remplit les formulaires avec ce qui est déjà connu. L'encart
+    // « Informations exploitation » écrit ses valeurs sur les propriétés des
+    // parcelles : il fait foi, pour ne pas redemander ce qui est déjà saisi.
     const firstProps = features[0]?.properties || {};
+    const encartExploitation = String(
+      firstProps.exploitation || firstProps.nom_exploitation || ""
+    ).trim();
+    const encartPacage = String(
+      firstProps.code_exploitation || firstProps.pacage || firstProps.numero_pacage || ""
+    ).trim();
+    if (encartExploitation || encartPacage) {
+      setCsvValues((prev) => ({
+        ...prev,
+        exploitation: encartExploitation || prev.exploitation,
+        codeExploitation: encartPacage || prev.codeExploitation,
+      }));
+    }
     setShapefileValues((prev) => ({
       ...prev,
       raisSoc:
         prev.raisSoc ||
-        String(firstProps.RAIS_SOCIA || firstProps.rais_soc || csvValues.exploitation || "")
+        String(
+          firstProps.RAIS_SOCIA ||
+            firstProps.rais_soc ||
+            encartExploitation ||
+            csvValues.exploitation ||
+            ""
+        )
           .trim()
           .toUpperCase(),
       campagne: prev.campagne || String(firstProps.CAMPAGNE || new Date().getFullYear()),
