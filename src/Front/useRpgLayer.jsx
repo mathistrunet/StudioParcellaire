@@ -27,8 +27,8 @@ function styleReady(map) {
  * - mapRef: React.RefObject<maplibregl.Map>
  * - drawRef: React.RefObject<MapboxDraw>
  * - minZoom?: number (défaut: 12)
- * - years?: number[] (défaut: [2024..2018])
- * - defaultYear?: number (défaut: 2023)
+ * - years?: number[] (défaut: [2025..2015])
+ * - defaultYear?: number (défaut: 2025)
  * - debounceMs?: number (défaut: 400)
  * - colorMap?: Record<string,string> (override de window.CULTURE_COLORS)
  * - defaultColor?: string (override de window.DEFAULT_CULTURE_COLOR)
@@ -38,8 +38,8 @@ export default function RpgFeature({
   drawRef,
   minZoom     = RPG_MIN_ZOOM,
   // Millésimes réellement exposés par le WFS GEOPF (vérifiés un par un).
-  years       = [2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015],
-  defaultYear = 2023,
+  years       = [2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015],
+  defaultYear = 2025,
   debounceMs  = 400,
   colorMap,
   defaultColor,
@@ -69,6 +69,7 @@ export default function RpgFeature({
       ["to-string",
         ["coalesce",
           ["get","code"],
+          ["get","code_cultu"],
           ["get","CODE_CULTURE"],
           ["get","CODE_CULTU"],
           ["get","CULT_CODE"],
