@@ -51,6 +51,15 @@ export default function RpgRomaniaFeature({
   const onImportedRef = useRef(onImported);
   useEffect(() => { onImportedRef.current = onImported; }, [onImported]);
 
+  // Le composant est démonté à chaque changement d'onglet alors que la carte, elle,
+  // survit. Ses gestionnaires doivent partir avec lui : ils liraient sinon les refs
+  // de l'instance disparue.
+  const detachHandlersRef = useRef(null);
+  useEffect(() => () => {
+    detachHandlersRef.current?.();
+    detachHandlersRef.current = null;
+  }, []);
+
   /** Crée la source + les couches + les handlers (une fois par style chargé) */
   const ensureSourceAndLayers = useCallback(() => {
     const map = mapRef?.current;
@@ -58,26 +67,28 @@ export default function RpgRomaniaFeature({
 
     const addAll = () => {
       if (!styleReady(map)) return;
-      if (map.getSource(RPG_RO_SOURCE_ID)) return; // déjà créé
+      if (!map.getSource(RPG_RO_SOURCE_ID)) {
+        map.addSource(RPG_RO_SOURCE_ID, {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
 
-      map.addSource(RPG_RO_SOURCE_ID, {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-      });
+        map.addLayer({
+          id: RPG_RO_LAYER_FILL,
+          type: "fill",
+          source: RPG_RO_SOURCE_ID,
+          paint: { "fill-color": "#0077b6", "fill-opacity": 0.18 },
+        });
 
-      map.addLayer({
-        id: RPG_RO_LAYER_FILL,
-        type: "fill",
-        source: RPG_RO_SOURCE_ID,
-        paint: { "fill-color": "#0077b6", "fill-opacity": 0.18 },
-      });
+        map.addLayer({
+          id: RPG_RO_LAYER_LINE,
+          type: "line",
+          source: RPG_RO_SOURCE_ID,
+          paint: { "line-color": "#023e8a", "line-width": 1.4, "line-opacity": 0.9 },
+        });
+      }
 
-      map.addLayer({
-        id: RPG_RO_LAYER_LINE,
-        type: "line",
-        source: RPG_RO_SOURCE_ID,
-        paint: { "line-color": "#023e8a", "line-width": 1.4, "line-opacity": 0.9 },
-      });
+      if (detachHandlersRef.current) return; // déjà posés par cette instance
 
       // Hover → popup identifiant
       const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
@@ -156,6 +167,15 @@ export default function RpgRomaniaFeature({
       };
       map.on("click", RPG_RO_LAYER_FILL, onClick);
       map.on("click", RPG_RO_LAYER_LINE, onClick);
+
+      detachHandlersRef.current = () => {
+        hoverPopup.remove();
+        for (const layer of [RPG_RO_LAYER_FILL, RPG_RO_LAYER_LINE]) {
+          map.off("mousemove", layer, onMove);
+          map.off("mouseleave", layer, onLeave);
+          map.off("click", layer, onClick);
+        }
+      };
     };
 
     if (styleReady(map)) addAll();
