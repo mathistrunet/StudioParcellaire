@@ -51,6 +51,8 @@ function readBioFlag(props = {}) {
 
 function setBioProps(props, bio) {
   const next = { ...props };
+  // Une saisie manuelle l'emporte : la case n'est plus le simple reflet du RPG.
+  delete next.bio_source;
   if (bio) {
     next.conduite_bio = true;
     next.isOrganic = true;
@@ -59,6 +61,33 @@ function setBioProps(props, bio) {
   } else {
     BIO_KEYS.forEach((key) => delete next[key]);
     delete next.organicType;
+  }
+  return next;
+}
+
+// Seul millésime du RPG publié avec un attribut `bio` à ce jour.
+const RPG_BIO_YEAR = 2025;
+const BIO_RPG_NOTES = {
+  oui: `Déclarée bio (RPG ${RPG_BIO_YEAR})`,
+  non: `Non déclarée (RPG ${RPG_BIO_YEAR})`,
+  inconnu: `Inconnu (RPG ${RPG_BIO_YEAR})`,
+};
+
+/**
+ * Applique le statut lu au RPG. Il reste déclaratif et ne dit ni AB ni conversion :
+ * aucun `organicType` n'est donc posé. « Non » ne retire qu'une coche venue du RPG :
+ * une saisie manuelle ou un import Télépac prime sur la couche publique.
+ */
+function applyBioFromRpg(props, statut) {
+  const next = { ...props, bio_rpg: statut };
+  if (statut === "oui" && !readBioFlag(props)) {
+    next.conduite_bio = true;
+    next.isOrganic = true;
+    next.parcelle_bio = "Oui";
+    next.bio_source = "RPG";
+  } else if (statut === "non" && props.bio_source === "RPG") {
+    BIO_KEYS.forEach((key) => delete next[key]);
+    delete next.bio_source;
   }
   return next;
 }
@@ -163,7 +192,7 @@ function resolveRpgCulture(rpgCode) {
  * à côté de la case de 13 px — sur le libellé ou la marge — cochait la case tout
  * en relançant la sélection, ce qui faisait clignoter la case.
  */
-function FlagCell({ cellStyle, checked, onToggle, label, title }) {
+function FlagCell({ cellStyle, checked, onToggle, label, title, note }) {
   return (
     <td style={cellStyle} onClick={(event) => event.stopPropagation()}>
       <label
@@ -184,6 +213,7 @@ function FlagCell({ cellStyle, checked, onToggle, label, title }) {
         />
         <span>{label}</span>
       </label>
+      {note ? <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.25 }}>{note}</div> : null}
     </td>
   );
 }
@@ -200,7 +230,7 @@ const FIXED_COLUMNS = [
   { id: "ilot", label: "Ilot.Parcelle", width: 120 },
   { id: "nom", label: "Nom", width: 190 },
   { id: "surface", label: "Surface (ha)", width: 95 },
-  { id: "bio", label: "Bio", width: 70 },
+  { id: "bio", label: "Bio", width: 110 },
   { id: "irrigable", label: "Irrigable", width: 85 },
 ];
 
@@ -349,8 +379,9 @@ const TableRow = React.memo(function TableRow({
         <FlagCell
           cellStyle={cellStyle}
           checked={isBio}
-          label="AB"
-          title="Parcelle conduite en agriculture biologique"
+          label={props.bio_source === "RPG" ? "Bio" : "AB"}
+          title="Conduite en agriculture biologique. Le statut RPG reprend la déclaration PAC : ce n'est pas une certification."
+          note={BIO_RPG_NOTES[props.bio_rpg]}
           onToggle={(next) => onUpdateField(idKey, (p) => setBioProps(p, next))}
         />
       )}
@@ -470,6 +501,7 @@ export default function ParcelleEditor({
   const rowsRef = useRef(new Map());
   const [typed, setTyped] = useState(buildEmptyTypedState);
   const [isFillingRpg, setIsFillingRpg] = useState(false);
+  const [isFillingBio, setIsFillingBio] = useState(false);
   // Remplissage UPR depuis SoilGrids
   const [isFillingSoil, setIsFillingSoil] = useState(false);
   const [soilFillProgress, setSoilFillProgress] = useState(null); // { done, total }
@@ -823,6 +855,80 @@ export default function ParcelleEditor({
       alert("Erreur lors du chargement RPG. Consulte la console pour le detail.");
     } finally {
       setIsFillingRpg(false);
+    }
+  };
+
+  const fillBioFromRpg = async () => {
+    const targets = features
+      .map((feature, index) => ({ feature, idKey: String(feature?.id ?? index) }))
+      .filter(({ feature, idKey }) => visibleIdKeys.has(idKey) && isSurfaceGeometry(feature?.geometry));
+    if (!targets.length) {
+      alert("Aucune parcelle avec un contour a remplir.");
+      return;
+    }
+
+    setIsFillingBio(true);
+    try {
+      const outcomes = await enrichParcelles(
+        targets.map(({ feature }) => feature.geometry),
+        { millesimes: [RPG_BIO_YEAR], inclureNom: false }
+      );
+
+      const statuts = new Map();
+      const counts = { oui: 0, non: 0, inconnu: 0, erreur: 0, conflit: 0, tropEtendu: 0 };
+      outcomes.forEach(({ result, error }, position) => {
+        // Refus définitif de l'API, pas une panne : relancer ne changerait rien.
+        if (error?.code === "GEOMETRIE_TROP_ETENDUE") {
+          counts.tropEtendu += 1;
+          return;
+        }
+        if (error || result?.cultures?.[String(RPG_BIO_YEAR)]?.statut === "erreur_wfs") {
+          counts.erreur += 1;
+          return;
+        }
+        // `null` : parcelle absente du RPG ou attribut manquant, ce n'est pas « non bio ».
+        const statut = result?.bio === true ? "oui" : result?.bio === false ? "non" : "inconnu";
+        counts[statut] += 1;
+        const { feature, idKey } = targets[position];
+        statuts.set(idKey, statut);
+        if (statut === "non" && readBioFlag(feature.properties) && feature.properties?.bio_source !== "RPG") {
+          counts.conflit += 1;
+        }
+      });
+
+      if (counts.erreur === targets.length) {
+        alert("Le service RPG est indisponible. Reessaie dans quelques instants.");
+        return;
+      }
+      setFeatures((prev) =>
+        (prev || []).map((feature, index) => {
+          const statut = statuts.get(String(feature?.id ?? index));
+          return statut ? { ...feature, properties: applyBioFromRpg(feature.properties, statut) } : feature;
+        })
+      );
+
+      const lignes = [
+        `RPG ${RPG_BIO_YEAR} : ${counts.oui} declaree(s) bio, ${counts.non} non declaree(s), ${counts.inconnu} inconnue(s).`,
+        "Statut declaratif : ni certification, ni distinction entre AB et conversion.",
+      ];
+      if (counts.conflit) {
+        lignes.push(`${counts.conflit} case(s) cochee(s) conservee(s) malgre un RPG sans bio : a verifier.`);
+      }
+      if (counts.oui) {
+        lignes.push("L'export Telepac n'indique pas ces parcelles en bio tant que la case n'est pas confirmee a la main.");
+      }
+      if (counts.tropEtendu) {
+        lignes.push(`${counts.tropEtendu} contour(s) trop etendu(s) pour une seule parcelle : non interroge(s).`);
+      }
+      if (counts.erreur) {
+        lignes.push(`${counts.erreur} parcelle(s) en erreur : a relancer.`);
+      }
+      alert(lignes.join("\n"));
+    } catch (error) {
+      console.error("[RPG] Remplissage du bio echoue:", error);
+      alert("Erreur lors du chargement RPG. Consulte la console pour le detail.");
+    } finally {
+      setIsFillingBio(false);
     }
   };
 
@@ -1219,6 +1325,25 @@ export default function ParcelleEditor({
                           }}
                         >
                           {isFillingNames ? "Remplissage..." : "Remplir"}
+                        </button>
+                      ) : null}
+
+                      {col.id === "bio" ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fillBioFromRpg();
+                          }}
+                          disabled={isFillingBio}
+                          title={`Lire la conduite bio déclarée au RPG ${RPG_BIO_YEAR} (ce n'est pas une certification)`}
+                          style={{
+                            ...headerButtonStyle,
+                            opacity: isFillingBio ? 0.6 : 1,
+                            cursor: isFillingBio ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          {isFillingBio ? "Remplissage..." : "Remplir"}
                         </button>
                       ) : null}
 
