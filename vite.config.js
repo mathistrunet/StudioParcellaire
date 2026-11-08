@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -74,6 +75,8 @@ export default defineConfig({
     include: ["polygon-clipping"],
   },
   test: {
+    // Les copies de travail des sessions Claude ne sont pas le projet à tester.
+    exclude: [...configDefaults.exclude, ".claude/**"],
     resolve: {
       alias: {
         "polygon-clipping": polygonClippingEsm,
