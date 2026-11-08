@@ -23,6 +23,8 @@ namespace StudioParcellaire
     public class LauncherForm : Form
     {
         private const int Port = 4174;
+        // node:sqlite, utilisé pour le parcellaire, n'est disponible sans option qu'à partir de cette version.
+        private static readonly Version MinNodeVersion = new Version(22, 13);
         private static readonly string BaseUrl = "http://localhost:" + Port + "/";
 
         private readonly TextBox _log;
@@ -200,18 +202,36 @@ namespace StudioParcellaire
                 return false;
             }
             Log("Node.js " + version.Trim());
+
+            Version parsed;
+            if (Version.TryParse(version.Trim().TrimStart('v'), out parsed) && parsed < MinNodeVersion)
+            {
+                Fail("Node.js " + version.Trim() + " est trop ancien : la version " + MinNodeVersion + " ou plus récente est requise.\n\n" +
+                     "Installez la version LTS depuis https://nodejs.org puis relancez StudioParcellaire.exe.");
+                return false;
+            }
             return true;
+        }
+
+        /// npm note les paquets installés dans node_modules/.package-lock.json : un fichier
+        /// de verrouillage plus récent signale des dépendances changées par une mise à jour.
+        private bool DependenciesAreUpToDate()
+        {
+            var installed = new FileInfo(Path.Combine(_appRoot, "node_modules", ".package-lock.json"));
+            if (!installed.Exists) return false;
+            var lockFile = new FileInfo(Path.Combine(_appRoot, "package-lock.json"));
+            return !lockFile.Exists || lockFile.LastWriteTimeUtc <= installed.LastWriteTimeUtc;
         }
 
         private async Task<bool> EnsureDependenciesAsync()
         {
-            if (Directory.Exists(Path.Combine(_appRoot, "node_modules")))
+            if (DependenciesAreUpToDate())
             {
                 Log("Dépendances déjà installées.");
                 return true;
             }
 
-            SetStatus("Installation des dépendances (première utilisation, quelques minutes)…");
+            SetStatus("Installation des dépendances (quelques minutes)…");
             Log("");
             Log("> npm install");
             var code = await RunLoggedAsync("npm", "install");
@@ -252,18 +272,45 @@ namespace StudioParcellaire
             {
                 var reference = File.GetLastWriteTimeUtc(builtFile);
                 var sourceDir = new DirectoryInfo(Path.Combine(_appRoot, "src"));
-                if (!sourceDir.Exists) return false;
-                foreach (var file in sourceDir.GetFiles("*", SearchOption.AllDirectories))
+                if (sourceDir.Exists)
                 {
-                    if (file.LastWriteTimeUtc > reference) return true;
+                    foreach (var file in sourceDir.GetFiles("*", SearchOption.AllDirectories))
+                    {
+                        if (file.LastWriteTimeUtc > reference) return true;
+                    }
                 }
-                var indexHtml = new FileInfo(Path.Combine(_appRoot, "index.html"));
-                return indexHtml.Exists && indexHtml.LastWriteTimeUtc > reference;
+
+                // public/ est recopié dans le build, sauf public/data : ces couches pèsent
+                // plusieurs gigaoctets et le build ne les utilise pas.
+                var publicDir = new DirectoryInfo(Path.Combine(_appRoot, "public"));
+                var publicData = Path.Combine(publicDir.FullName, "data") + Path.DirectorySeparatorChar;
+                if (publicDir.Exists && PublicIsNewerThan(publicDir, publicData, reference)) return true;
+
+                foreach (var name in new[] { "index.html", "vite.config.js", "package-lock.json" })
+                {
+                    var file = new FileInfo(Path.Combine(_appRoot, name));
+                    if (file.Exists && file.LastWriteTimeUtc > reference) return true;
+                }
+                return false;
             }
             catch
             {
                 return false; // en cas de doute, on ne reconstruit pas inutilement
             }
+        }
+
+        private static bool PublicIsNewerThan(DirectoryInfo directory, string excludedPrefix, DateTime reference)
+        {
+            foreach (var file in directory.GetFiles())
+            {
+                if (file.LastWriteTimeUtc > reference) return true;
+            }
+            foreach (var child in directory.GetDirectories())
+            {
+                if ((child.FullName + Path.DirectorySeparatorChar).StartsWith(excludedPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (PublicIsNewerThan(child, excludedPrefix, reference)) return true;
+            }
+            return false;
         }
 
         private bool StartServer()
