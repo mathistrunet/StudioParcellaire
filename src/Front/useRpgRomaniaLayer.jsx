@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import maplibregl from "../services/maplibre";
 import { fetchRpgRomaniaGeoJSON, getRpgRomaniaId, RPG_RO_MAX_FEATURES } from "../services/rpgRomania";
+import { rpgHoverPopupHtml, rpgImportPopupHtml } from "../services/mapPopupHtml";
 
 /** Constantes */
 export const RPG_RO_MIN_ZOOM   = 12;
@@ -97,7 +98,7 @@ export default function RpgRomaniaFeature({
         const id = getRpgRomaniaId(f.properties) || "(sans ID)";
         hoverPopup
           .setLngLat([e.lngLat.lng, e.lngLat.lat])
-          .setHTML(`<div style="font:12px/1.3 system-ui"><strong>RPG RO — ${id}</strong></div>`)
+          .setHTML(rpgHoverPopupHtml(`RPG RO — ${id}`))
           .addTo(map);
         map.getCanvas().style.cursor = "pointer";
       };
@@ -119,17 +120,7 @@ export default function RpgRomaniaFeature({
         const id = getRpgRomaniaId(f.properties);
 
         const el = document.createElement("div");
-        el.innerHTML = `
-          <div style="font:12px/1.35 system-ui">
-            <div style="font-weight:600; margin-bottom:6px">RPG Roumanie — ${id || "(sans ID)"}</div>
-            <button id="btn-import-rpg-ro" style="
-              padding:6px 10px;border:1px solid #ddd;border-radius:8px;
-              background:#fff;cursor:pointer
-            ">
-              Importer cette parcelle
-            </button>
-          </div>
-        `;
+        el.innerHTML = rpgImportPopupHtml(`RPG Roumanie — ${id || "(sans ID)"}`, "btn-import-rpg-ro");
         const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true })
           .setLngLat([e.lngLat.lng, e.lngLat.lat])
           .setDOMContent(el)

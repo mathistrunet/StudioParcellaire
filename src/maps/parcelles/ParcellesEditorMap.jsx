@@ -48,6 +48,7 @@ import {
   buildSoilCombinationKey,
 } from "../../services/soilTypeMapping";
 import { fetchSoilGridsVisibleGrid } from "../../services/soilgridsGridBackend";
+import { soilGridsPixelPopupHtml } from "../../services/mapPopupHtml";
 import { featureCollectionsEqual } from "../../utils/featureCollectionEquality";
 import {
   clearParcellesGeojson,
@@ -931,23 +932,12 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
       const center = Number.isFinite(centerLon) && Number.isFinite(centerLat) ? [centerLon, centerLat] : null;
       const bbox = parseBboxValue(props?.bboxWgs84);
 
-      const html = [
-        `<strong>${props.pixelId || "Pixel SoilGrids"}</strong>`,
-        `Ligne / colonne : ${props.row ?? "?"} / ${props.col ?? "?"}`,
-        center ? `Centre : ${Number(center[1]).toFixed(6)}, ${Number(center[0]).toFixed(6)}` : null,
-        Array.isArray(bbox)
-          ? `BBox : ${bbox.map((v) => Number(v).toFixed(6)).join(", ")}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("<br />");
-
       if (soilGridsGridPopupRef.current) {
         soilGridsGridPopupRef.current.remove();
       }
       soilGridsGridPopupRef.current = new maplibregl.Popup({ closeButton: true })
         .setLngLat(event.lngLat)
-        .setHTML(`<div style="font-size:12px;">${html}</div>`)
+        .setHTML(soilGridsPixelPopupHtml({ pixelId: props.pixelId, row: props.row, col: props.col, center, bbox }))
         .addTo(mapInstance);
     };
 

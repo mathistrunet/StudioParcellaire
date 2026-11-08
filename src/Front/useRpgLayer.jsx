@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import maplibregl from "../services/maplibre";
 import { fetchRpgGeoJSON, getCultureLabel, getMapBoundsCRS84 } from "../services/rpg";
+import { rpgHoverPopupHtml, rpgImportPopupHtml } from "../services/mapPopupHtml";
 
 /** Constantes (exportées si besoin ailleurs) */
 export const RPG_MIN_ZOOM   = 12;
@@ -142,7 +143,7 @@ export default function RpgFeature({
         const { label } = getCultureLabel(f.properties);
         hoverPopup
           .setLngLat([e.lngLat.lng, e.lngLat.lat])
-          .setHTML(`<div style="font:12px/1.3 system-ui"><strong>${label}</strong></div>`)
+          .setHTML(rpgHoverPopupHtml(label))
           .addTo(map);
         map.getCanvas().style.cursor = "pointer";
       };
@@ -164,17 +165,7 @@ export default function RpgFeature({
         const { label, code } = getCultureLabel(f.properties);
 
         const el = document.createElement("div");
-        el.innerHTML = `
-          <div style="font:12px/1.35 system-ui">
-            <div style="font-weight:600; margin-bottom:6px">${label}</div>
-            <button id="btn-import-rpg" style="
-              padding:6px 10px;border:1px solid #ddd;border-radius:8px;
-              background:#fff;cursor:pointer
-            ">
-              Importer cette parcelle
-            </button>
-          </div>
-        `;
+        el.innerHTML = rpgImportPopupHtml(label, "btn-import-rpg");
         const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true })
           .setLngLat([e.lngLat.lng, e.lngLat.lat])
           .setDOMContent(el)

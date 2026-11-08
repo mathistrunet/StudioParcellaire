@@ -4,6 +4,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 import { useRasterLayers } from "../../features/map/useRasterLayers";
 import { fetchParcellesGeojson } from "../../services/parcellesBackend";
+import { parcellePopupHtml } from "../../services/mapPopupHtml";
 import { resolvePreviousDisplayValue } from "../../domain/parcelles/fusion";
 import { normalizeParcellesCollection } from "./parcellesData";
 import {
@@ -222,14 +223,12 @@ export default function ParcellesViewerMap({
       const culture = props.culture ? `Culture : ${props.culture}` : null;
       const precedentValue = resolvePreviousDisplayValue(props);
       const precedent = precedentValue ? `Précédent : ${precedentValue}` : null;
-      const content = [title, culture, precedent].filter(Boolean).join("<br />");
-      if (!content) return;
       if (popupRef.current) {
         popupRef.current.remove();
       }
       popupRef.current = new maplibregl.Popup({ closeButton: true })
         .setLngLat(event.lngLat)
-        .setHTML(`<div style="font-size:12px;">${content}</div>`)
+        .setHTML(parcellePopupHtml([title, culture, precedent]))
         .addTo(map);
 
       const parcelId = String(feature.id ?? feature.properties?.id ?? feature.properties?.parcelleNo ?? "");

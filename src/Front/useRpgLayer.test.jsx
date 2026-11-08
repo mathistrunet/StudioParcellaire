@@ -8,10 +8,12 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 // Le composant crée des popups MapLibre : on les remplace par une coquille qui
 // retient l'élément DOM, ce qui permet de cliquer « Importer cette parcelle ».
 let dernierePopup = null;
+let dernierHtml = null;
+let libelleRpg = "Blé tendre";
 vi.mock("../services/maplibre", () => {
   class Popup {
     setLngLat() { return this; }
-    setHTML() { return this; }
+    setHTML(html) { dernierHtml = html; return this; }
     setDOMContent(el) { this.el = el; dernierePopup = this; return this; }
     addTo() { return this; }
     remove() { return this; }
@@ -21,7 +23,7 @@ vi.mock("../services/maplibre", () => {
 
 vi.mock("../services/rpg", () => ({
   fetchRpgGeoJSON: vi.fn(async () => ({ type: "FeatureCollection", features: [] })),
-  getCultureLabel: () => ({ label: "Blé tendre", code: "BTH" }),
+  getCultureLabel: () => ({ label: libelleRpg, code: "BTH" }),
   getMapBoundsCRS84: () => [1, 43, 2, 44],
 }));
 
@@ -92,6 +94,37 @@ async function importerUneParcelle(vue) {
     dernierePopup.el.querySelector("#btn-import-rpg").click();
   });
 }
+
+describe("RpgFeature — libellé piégé venu du service RPG", () => {
+  const PIEGE = "<img src=x onerror=alert(1)>";
+  let vue;
+
+  afterEach(() => {
+    libelleRpg = "Blé tendre";
+    act(() => vue.root.unmount());
+    vue.container.remove();
+  });
+
+  it("l'affiche comme du texte au survol et au clic, et garde le bouton d'import", async () => {
+    libelleRpg = PIEGE;
+    vue = render({});
+    await act(async () => {
+      vue.container.querySelector('input[type="checkbox"]').click();
+    });
+    const evenement = { features: [rpgFeature], lngLat: { lng: 1.05, lat: 43.05 } };
+
+    act(() => vue.map.handlers.get("mousemove:rpg_fill")(evenement));
+    const survol = document.createElement("div");
+    survol.innerHTML = dernierHtml;
+    expect(survol.querySelector("img")).toBeNull();
+    expect(survol.textContent).toBe(PIEGE);
+
+    act(() => vue.map.handlers.get("click:rpg_fill")(evenement));
+    expect(dernierePopup.el.querySelector("img")).toBeNull();
+    expect(dernierePopup.el.textContent).toContain(PIEGE);
+    expect(dernierePopup.el.querySelector("#btn-import-rpg")).not.toBeNull();
+  });
+});
 
 describe("RpgFeature — import d'une parcelle", () => {
   let vue;
