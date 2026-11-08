@@ -11,7 +11,7 @@ export async function fetchParcelSoilGrids(parcelId, { refresh = false, depthPro
     try {
       const payload = await response.json();
       if (payload?.error) message = payload.error;
-    } catch (_) { /* réponse non-JSON (ex. 502 HTML) */ }
+    } catch { /* réponse non-JSON (ex. 502 HTML) */ }
     throw new Error(message);
   }
   return response.json();
@@ -29,7 +29,7 @@ export async function fetchParcelWrb(parcelId, { refresh = false, signal } = {})
     try {
       const payload = await response.json();
       if (payload?.error) message = payload.error;
-    } catch (_) { /* réponse non-JSON */ }
+    } catch { /* réponse non-JSON */ }
     throw new Error(message);
   }
   return response.json();
