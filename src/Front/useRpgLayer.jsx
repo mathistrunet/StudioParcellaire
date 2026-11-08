@@ -1,6 +1,6 @@
 // useRpgLayer.jsx
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../services/maplibre";
 import { fetchRpgGeoJSON, getCultureLabel, getMapBoundsCRS84 } from "../services/rpg";
 
 /** Constantes (exportées si besoin ailleurs) */
@@ -58,6 +58,15 @@ export default function RpgFeature({
   useEffect(() => { yearRef.current = year; }, [year]);
   useEffect(() => { onImportedRef.current = onImported; }, [onImported]);
 
+  // Le composant est démonté à chaque changement d'onglet alors que la carte, elle,
+  // survit. Ses gestionnaires doivent partir avec lui : ils liraient sinon les refs
+  // de l'instance disparue, donc le millésime du premier affichage de l'onglet.
+  const detachHandlersRef = useRef(null);
+  useEffect(() => () => {
+    detachHandlersRef.current?.();
+    detachHandlersRef.current = null;
+  }, []);
+
   /** Expression MapLibre pour colorer selon le code culture */
   const buildFillColorExpr = useCallback(() => {
     const COLOR_MAP     = colorMap || (typeof window !== "undefined" ? window.CULTURE_COLORS : {}) || {};
@@ -98,31 +107,33 @@ export default function RpgFeature({
 
     const addAll = () => {
       if (!styleReady(map)) return;
-      if (map.getSource(RPG_SOURCE_ID)) return; // déjà créé
+      if (!map.getSource(RPG_SOURCE_ID)) {
+        map.addSource(RPG_SOURCE_ID, {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
 
-      map.addSource(RPG_SOURCE_ID, {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-      });
+        map.addLayer({
+          id: RPG_LAYER_FILL,
+          type: "fill",
+          source: RPG_SOURCE_ID,
+          paint: {
+            "fill-color": (colorMap || (typeof window !== "undefined" && window.CULTURE_COLORS))
+              ? buildFillColorExpr()
+              : "#ff6b00",
+            "fill-opacity": 0.18,
+          },
+        });
 
-      map.addLayer({
-        id: RPG_LAYER_FILL,
-        type: "fill",
-        source: RPG_SOURCE_ID,
-        paint: {
-          "fill-color": (colorMap || (typeof window !== "undefined" && window.CULTURE_COLORS))
-            ? buildFillColorExpr()
-            : "#ff6b00",
-          "fill-opacity": 0.18,
-        },
-      });
+        map.addLayer({
+          id: RPG_LAYER_LINE,
+          type: "line",
+          source: RPG_SOURCE_ID,
+          paint: { "line-color": "#ff4d00", "line-width": 1.4, "line-opacity": 0.9 },
+        });
+      }
 
-      map.addLayer({
-        id: RPG_LAYER_LINE,
-        type: "line",
-        source: RPG_SOURCE_ID,
-        paint: { "line-color": "#ff4d00", "line-width": 1.4, "line-opacity": 0.9 },
-      });
+      if (detachHandlersRef.current) return; // déjà posés par cette instance
 
       // Hover → popup libellé
       const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
@@ -204,6 +215,15 @@ export default function RpgFeature({
       };
       map.on("click", RPG_LAYER_FILL, onClick);
       map.on("click", RPG_LAYER_LINE, onClick);
+
+      detachHandlersRef.current = () => {
+        hoverPopup.remove();
+        for (const layer of [RPG_LAYER_FILL, RPG_LAYER_LINE]) {
+          map.off("mousemove", layer, onMove);
+          map.off("mouseleave", layer, onLeave);
+          map.off("click", layer, onClick);
+        }
+      };
     };
 
     if (styleReady(map)) addAll();

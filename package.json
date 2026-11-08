@@ -24,7 +24,7 @@
     "@xmldom/xmldom": "^0.8.11",
     "dbf": "^0.2.0",
     "jszip": "^3.10.1",
-    "maplibre-gl": "^5.19.0",
+    "maplibre-gl": "^6.17.0",
     "pako": "^2.1.0",
     "papaparse": "^5.5.3",
     "pbf": "^4.0.1",
