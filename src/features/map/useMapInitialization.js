@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../../services/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
@@ -189,15 +189,6 @@ export function useMapInitialization() {
     }
   }, []);
 useEffect(() => {
-    if (typeof maplibregl.supported === "function" && !maplibregl.supported()) {
-      setMapInitError(
-        buildError(
-          ERROR_CODES.MAPLIBRE_UNSUPPORTED,
-          "Votre navigateur ne supporte pas WebGL."
-        )
-      );
-      return;
-    }
     const style = {
       version: 8,
       glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
@@ -222,12 +213,19 @@ useEffect(() => {
         maxPitch: 0,
       });
     } catch (error) {
+      // MapLibre 6 exige WebGL2 et le signale par cette erreur au lieu de maplibregl.supported().
       setMapInitError(
-        buildError(
-          ERROR_CODES.MAP_INIT_FAILED,
-          "Impossible d'initialiser la carte.",
-          error
-        )
+        error instanceof maplibregl.GPUInitializationError
+          ? buildError(
+              ERROR_CODES.MAPLIBRE_UNSUPPORTED,
+              "Votre navigateur ne supporte pas WebGL2.",
+              error
+            )
+          : buildError(
+              ERROR_CODES.MAP_INIT_FAILED,
+              "Impossible d'initialiser la carte.",
+              error
+            )
       );
       return;
     }

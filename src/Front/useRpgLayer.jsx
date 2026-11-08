@@ -1,6 +1,6 @@
 // useRpgLayer.jsx
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../services/maplibre";
 import { fetchRpgGeoJSON, getCultureLabel, getMapBoundsCRS84 } from "../services/rpg";
 
 /** Constantes (exportées si besoin ailleurs) */

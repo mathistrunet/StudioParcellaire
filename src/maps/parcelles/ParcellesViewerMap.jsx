@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../../services/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import { useRasterLayers } from "../../features/map/useRasterLayers";

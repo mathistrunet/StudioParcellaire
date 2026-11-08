@@ -1,6 +1,6 @@
 // src/maps/parcelles/ParcellesEditorMap.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../../services/maplibre";
 import centroid from "@turf/centroid";
 
 import AppTopBar from "../../components/AppTopBar";

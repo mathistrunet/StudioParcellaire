@@ -1,6 +1,6 @@
 // useRpgRomaniaLayer.jsx
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../services/maplibre";
 import { fetchRpgRomaniaGeoJSON, getRpgRomaniaId, RPG_RO_MAX_FEATURES } from "../services/rpgRomania";
 
 /** Constantes */
