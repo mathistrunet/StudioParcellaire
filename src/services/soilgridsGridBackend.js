@@ -8,7 +8,8 @@ export async function fetchSoilGridsVisibleGrid({ bbox, limit = 5000, signal } =
     limit: String(limit),
   });
   const response = await fetch(`/api/soilgrids/grid?${params.toString()}`, { signal });
-  const payload = await response.json();
+  // Une réponse non JSON (serveur local arrêté derrière le proxy) ne doit pas masquer l'erreur.
+  const payload = await response.json().catch(() => null);
   if (!response.ok) {
     throw new Error(payload?.error || "Grille SoilGrids indisponible");
   }

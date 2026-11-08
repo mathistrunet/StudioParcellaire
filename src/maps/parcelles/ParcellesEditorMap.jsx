@@ -713,7 +713,13 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
   );
 
   const ensureSoilGridsGridLayer = useCallback(() => {
-    if (!mapInstance || !mapInstance.isStyleLoaded()) return false;
+    if (!mapInstance) return false;
+    // isStyleLoaded() repasse à false dès qu'une propriété de couche change : testé en premier, il
+    // ferait abandonner le chargement de la grille au moment même où l'on coche son affichage.
+    if (mapInstance.getSource(SOILGRIDS_GRID_SOURCE_ID) && mapInstance.getLayer(SOILGRIDS_GRID_LAYER_ID)) {
+      return true;
+    }
+    if (!mapInstance.isStyleLoaded()) return false;
 
     if (!mapInstance.getSource(SOILGRIDS_GRID_SOURCE_ID)) {
       mapInstance.addSource(SOILGRIDS_GRID_SOURCE_ID, {
@@ -795,15 +801,18 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
     if (!mapInstance) return;
 
     if (!mapInstance.isStyleLoaded()) {
-      const onLoad = () => {
+      // "idle" et non "load" : le style peut être occupé alors que "load" est déjà passé. La grille
+      // cochée entre-temps n'a pas pu se charger, faute de couche : on la relance ici.
+      const onReady = () => {
         ensureSoilGridsGridLayer();
+        refreshSoilGridsGrid();
       };
-      mapInstance.once("load", onLoad);
-      return () => mapInstance.off("load", onLoad);
+      mapInstance.once("idle", onReady);
+      return () => mapInstance.off("idle", onReady);
     }
 
     ensureSoilGridsGridLayer();
-  }, [mapInstance, ensureSoilGridsGridLayer]);
+  }, [mapInstance, ensureSoilGridsGridLayer, refreshSoilGridsGrid]);
 
   useEffect(() => {
     if (!mapInstance || !mapInstance.getLayer(SOILGRIDS_GRID_LAYER_ID)) return;

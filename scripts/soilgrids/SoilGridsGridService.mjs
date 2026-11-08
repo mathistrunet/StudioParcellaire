@@ -1,13 +1,19 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import proj4 from "proj4";
 import { DOMParser } from "@xmldom/xmldom";
+import { ighForward, ighInverse } from "./homolosine.mjs";
 
-const DEFAULT_WCS_URL = "https://maps.isric.org/mapserv?map=/map/soilgrids.map";
+// ISRIC a retiré la carte globale soilgrids.map : seules les cartes par propriété répondent.
+// La grille 250 m est la même pour toutes ; l'argile en décrit donc le découpage.
+const DEFAULT_WCS_URL = "https://maps.isric.org/mapserv?map=/map/clay.map";
 const METADATA_FILE_NAME = "soilgrids-grid-metadata.json";
 const METADATA_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const WCS_TIMEOUT_MS = 90_000; // par requête ; ISRIC met jusqu'à 53 s mesurées sur GetCapabilities
 const EPSG_4326 = "EPSG:4326";
+const EPSG_IGH = "EPSG:152160"; // Interrupted Goode Homolosine, CRS natif de SoilGrids
+const SUPPORTED_CRS = new Set([EPSG_4326, EPSG_IGH]);
 const DEFAULT_LIMIT = 5000;
+const BBOX_SAMPLE_STEPS = 16;
 
 function byLocalName(node, localName) {
   if (!node?.getElementsByTagName) return [];
@@ -34,12 +40,11 @@ function parseNumberPair(raw) {
   return [values[0], values[1]];
 }
 
-function parseEpsg(raw) {
-  const value = String(raw || "");
-  const match = value.match(/EPSG(?:[/:]|%3A|%2F)*(\d+)/i);
-  if (match?.[1]) return `EPSG:${match[1]}`;
-  if (value.toUpperCase().startsWith("EPSG:")) return value.toUpperCase();
-  return null;
+// Accepte EPSG:4326, urn:ogc:def:crs:EPSG::4326 et http://www.opengis.net/def/crs/EPSG/0/4326.
+// Le segment facultatif est le numéro de version de ces deux dernières formes, pas le code.
+export function parseEpsg(raw) {
+  const match = String(raw || "").match(/EPSG(?:[/:]|%3A|%2F)*(?:\d+(?:\.\d+)*(?:[/:]|%3A|%2F)+)?(\d+)/i);
+  return match ? `EPSG:${match[1]}` : null;
 }
 
 function normalizeAxisOrder(coords, axisLabels) {
@@ -77,7 +82,7 @@ function parseCoverageIds(capabilitiesXml) {
     .filter(Boolean);
 }
 
-function parseDescribeCoverage(xml, coverageId) {
+function parseDescribeCoverage(xml, coverageId, sourceUrl = DEFAULT_WCS_URL) {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
 
   const envelope = byLocalName(doc, "Envelope")[0];
@@ -116,10 +121,14 @@ function parseDescribeCoverage(xml, coverageId) {
     throw new Error("DescribeCoverage invalide: resolution non exploitable.");
   }
 
-  const crs = parseEpsg(envelope?.getAttribute("srsName")) || EPSG_4326;
+  const srsName = envelope?.getAttribute("srsName");
+  const crs = parseEpsg(srsName);
+  if (!SUPPORTED_CRS.has(crs)) {
+    throw new Error(`Projection SoilGrids non prise en charge : ${srsName || "non renseignée"}.`);
+  }
   return {
     source: "WCS DescribeCoverage",
-    sourceUrl: DEFAULT_WCS_URL,
+    sourceUrl,
     coverageId,
     fetchedAt: new Date().toISOString(),
     crs,
@@ -135,13 +144,31 @@ function parseDescribeCoverage(xml, coverageId) {
   };
 }
 
-async function fetchWcsMetadata({ wcsBaseUrl = DEFAULT_WCS_URL }) {
-  const capabilitiesUrl = buildCapabilitiesUrl(wcsBaseUrl);
-  const capabilitiesResponse = await fetch(capabilitiesUrl);
-  if (!capabilitiesResponse.ok) {
-    throw new Error(`WCS GetCapabilities HTTP ${capabilitiesResponse.status}`);
+// MapServer signale une carte introuvable par une page HTML en HTTP 200 : le statut ne suffit pas.
+async function fetchWcsXml(url, requestName) {
+  let response;
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(WCS_TIMEOUT_MS) });
+  } catch (error) {
+    throw new Error(`Service SoilGrids (ISRIC) injoignable (${requestName}) : ${error?.message || error}.`);
   }
-  const capabilitiesXml = await capabilitiesResponse.text();
+  if (!response.ok) {
+    throw new Error(`Le service SoilGrids (ISRIC) a répondu HTTP ${response.status} (${requestName}).`);
+  }
+  const body = await response.text();
+  const contentType = response.headers.get("content-type") || "";
+  if (/html/i.test(contentType) || /^\s*<(!doctype\s+html|html)\b/i.test(body)) {
+    const detail = body.match(/ms\w+\(\):[^<\n]*/)?.[0]?.trim();
+    throw new Error(
+      `Le service SoilGrids (ISRIC) a renvoyé une page HTML au lieu de données (${requestName}) : ` +
+        `carte indisponible ou déplacée.${detail ? ` Détail : ${detail}` : ""}`,
+    );
+  }
+  return body;
+}
+
+async function fetchWcsMetadata({ wcsBaseUrl = DEFAULT_WCS_URL }) {
+  const capabilitiesXml = await fetchWcsXml(buildCapabilitiesUrl(wcsBaseUrl), "GetCapabilities");
   const coverageIds = parseCoverageIds(capabilitiesXml);
   if (!coverageIds.length) {
     throw new Error("Aucune couverture WCS SoilGrids detectee.");
@@ -150,17 +177,32 @@ async function fetchWcsMetadata({ wcsBaseUrl = DEFAULT_WCS_URL }) {
   const preferredCoverage =
     coverageIds.find((id) => /clay|soc|cec|nitrogen|bdod/i.test(id)) ||
     coverageIds[0];
-  const describeUrl = buildDescribeCoverageUrl(wcsBaseUrl, preferredCoverage);
-  const describeResponse = await fetch(describeUrl);
-  if (!describeResponse.ok) {
-    throw new Error(`WCS DescribeCoverage HTTP ${describeResponse.status}`);
-  }
-  const describeXml = await describeResponse.text();
-  return parseDescribeCoverage(describeXml, preferredCoverage);
+  const describeXml = await fetchWcsXml(
+    buildDescribeCoverageUrl(wcsBaseUrl, preferredCoverage),
+    "DescribeCoverage",
+  );
+  return parseDescribeCoverage(describeXml, preferredCoverage, wcsBaseUrl);
 }
 
 function metadataCacheFile(dataDir) {
   return path.join(dataDir, METADATA_FILE_NAME);
+}
+
+// Écarte notamment les caches écrits avec le CRS erroné EPSG:0 par l'ancien parseEpsg.
+function isUsableMetadata(metadata) {
+  return (
+    SUPPORTED_CRS.has(metadata?.crs) &&
+    [
+      metadata.extent?.minX,
+      metadata.extent?.minY,
+      metadata.extent?.maxX,
+      metadata.extent?.maxY,
+      metadata.pixelSize?.x,
+      metadata.pixelSize?.y,
+      metadata.dimensions?.width,
+      metadata.dimensions?.height,
+    ].every(Number.isFinite)
+  );
 }
 
 async function readMetadataFromDisk(dataDir) {
@@ -168,6 +210,7 @@ async function readMetadataFromDisk(dataDir) {
   try {
     const [raw, fileStat] = await Promise.all([readFile(filePath, "utf-8"), stat(filePath)]);
     const parsed = JSON.parse(raw);
+    if (!isUsableMetadata(parsed)) return null;
     return { parsed, mtimeMs: fileStat.mtimeMs };
   } catch {
     return null;
@@ -220,23 +263,30 @@ export class SoilGridsGridService {
   transformPoint(point, fromCrs, toCrs) {
     if (!Array.isArray(point) || point.length < 2) return null;
     if (!fromCrs || !toCrs || fromCrs === toCrs) return [point[0], point[1]];
-    return proj4(fromCrs, toCrs, [point[0], point[1]]);
+    if (fromCrs === EPSG_4326 && toCrs === EPSG_IGH) return ighForward(point[0], point[1]);
+    if (fromCrs === EPSG_IGH && toCrs === EPSG_4326) return ighInverse(point[0], point[1]);
+    throw new Error(`Reprojection SoilGrids non prise en charge : ${fromCrs} vers ${toCrs}.`);
   }
 
-  transformBbox(bbox, fromCrs, toCrs) {
+  // `steps` échantillonne l'emprise : l'Homolosine courbe les méridiens et coupe la carte en lobes,
+  // ses seuls coins ne donnent donc pas l'étendue d'une grande emprise.
+  transformBbox(bbox, fromCrs, toCrs, steps = 1) {
     if (!bbox || bbox.length !== 4) return null;
     if (!fromCrs || !toCrs || fromCrs === toCrs) return bbox.slice();
-    const corners = [
-      [bbox[0], bbox[1]],
-      [bbox[0], bbox[3]],
-      [bbox[2], bbox[1]],
-      [bbox[2], bbox[3]],
-    ]
-      .map((point) => this.transformPoint(point, fromCrs, toCrs))
-      .filter(Boolean);
-    if (!corners.length) return null;
-    const xs = corners.map((point) => point[0]);
-    const ys = corners.map((point) => point[1]);
+    const points = [];
+    for (let i = 0; i <= steps; i += 1) {
+      for (let j = 0; j <= steps; j += 1) {
+        const point = this.transformPoint(
+          [bbox[0] + ((bbox[2] - bbox[0]) * i) / steps, bbox[1] + ((bbox[3] - bbox[1]) * j) / steps],
+          fromCrs,
+          toCrs,
+        );
+        if (point) points.push(point);
+      }
+    }
+    if (!points.length) return null;
+    const xs = points.map((point) => point[0]);
+    const ys = points.map((point) => point[1]);
     return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
   }
 
@@ -263,6 +313,8 @@ export class SoilGridsGridService {
       [minCellX, minCellY],
     ];
     const ringWgs84 = ringRaster.map((point) => this.transformPoint(point, crs, EPSG_4326));
+    // Une cellule à cheval sur une interruption de la carte n'a pas de géométrie terrestre.
+    if (ringWgs84.some((point) => !point)) return null;
     const centerRaster = [(minCellX + maxCellX) / 2, (minCellY + maxCellY) / 2];
     const centerWgs84 = this.transformPoint(centerRaster, crs, EPSG_4326);
     const bboxWgs84 = this.transformBbox([minCellX, minCellY, maxCellX, maxCellY], crs, EPSG_4326);
@@ -289,7 +341,14 @@ export class SoilGridsGridService {
   buildGridCollection({ bboxWgs84, limit = DEFAULT_LIMIT }) {
     const metadata = this.inMemoryMetadata;
     const cappedLimit = this.clamp(Number(limit) || DEFAULT_LIMIT, 1, 20000);
-    const bboxRaster = this.transformBbox(bboxWgs84, EPSG_4326, metadata.crs);
+    // La carte peut afficher des copies du monde : on ramène l'emprise sur la Terre.
+    const bboxOnEarth = [
+      this.clamp(bboxWgs84[0], -180, 180),
+      this.clamp(bboxWgs84[1], -90, 90),
+      this.clamp(bboxWgs84[2], -180, 180),
+      this.clamp(bboxWgs84[3], -90, 90),
+    ];
+    const bboxRaster = this.transformBbox(bboxOnEarth, EPSG_4326, metadata.crs, BBOX_SAMPLE_STEPS);
     if (!bboxRaster) {
       return { metadata, collection: { type: "FeatureCollection", features: [] }, featureCount: 0, truncated: false };
     }
@@ -316,7 +375,8 @@ export class SoilGridsGridService {
     let truncated = false;
     for (let row = rowStart; row <= rowEnd; row += 1) {
       for (let col = colStart; col <= colEnd; col += 1) {
-        features.push(this.buildPixelFeature({ row, col, metadata }));
+        const feature = this.buildPixelFeature({ row, col, metadata });
+        if (feature) features.push(feature);
         if (features.length >= cappedLimit) {
           truncated = true;
           break;
