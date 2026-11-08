@@ -136,7 +136,7 @@ Notes :
 Persistance actuelle :
 
 - stockage local temporaire via `localStorage`
-- sauvegarde backend dans `data/parcelles.geojson`
+- sauvegarde dans `%APPDATA%StudioParcellaireparcellaire.db`
 - mappings de sols dans `data/soil-type-mappings.json`
 - cache SoilGrids dans `data/parcel-soilgrids-cache.json`
 

@@ -16,7 +16,7 @@ installe les dépendances si nécessaire, construit l'interface, démarre le
 serveur local et ouvre le navigateur sur <http://localhost:4174>. Fermer la
 fenêtre du lanceur arrête le serveur.
 
-Seul prérequis : [Node.js](https://nodejs.org/) (version LTS).
+Seul prérequis : [Node.js](https://nodejs.org/) 22.13 ou plus récent (version LTS).
 
 Pour régénérer l'exécutable après modification du lanceur :
 
@@ -115,7 +115,20 @@ Le type de sol se saisit manuellement ou se déduit automatiquement :
 
 L'application démarre sans parcellaire enregistré. Le travail en cours est
 sauvegardé automatiquement sur le poste et rechargé à l'ouverture suivante ; le
-bouton **Réinitialiser** de la barre d'outils efface tout.
+bouton **Réinitialiser** de la barre d'outils efface tout, et une sauvegarde
+permet de revenir en arrière tant que le parcellaire reste vide.
+
+## Où sont les données
+
+Le parcellaire, les associations de sols et les caches SoilGrids sont enregistrés
+hors du dossier de l'application, dans `%APPDATA%StudioParcellaire` sous Windows
+(base SQLite `parcellaire.db`). Arrêter le serveur, remplacer le dossier de
+l'application ou la mettre à jour n'y touche pas. Rien n'est envoyé sur Internet,
+hormis les coordonnées transmises aux services en ligne lorsqu'on les interroge.
+
+Au premier démarrage, `data/parcelles.geojson` est repris dans la base s'il existe ;
+ce fichier n'est ni modifié ni supprimé, mais il n'est plus lu ensuite. La variable
+d'environnement `STUDIO_DATA_DIR` permet de choisir un autre dossier.
 
 ## Configuration optionnelle
 

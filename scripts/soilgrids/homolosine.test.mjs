@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { soilGridsPixel, soilGridsPixelKey } from "./homolosine.mjs";
+import { ighForward, ighInverse, soilGridsPixel, soilGridsPixelKey } from "./homolosine.mjs";
 
 // Bords de pixels RÉELS relevés sur l'API ISRIC par bissection (changement de valeur), servant
 // de vérité terrain. La grille du module doit voir son index changer en franchissant chaque bord.
@@ -36,6 +36,61 @@ describe("soilGridsPixel — alignement sur la grille native SoilGrids", () => {
       const b = soilGridsPixel(lon, lat + E).row;
       // Y décroît quand la latitude augmente : l'index de ligne diminue de 1.
       expect(a - b, `bord ligne @(${lon},${lat})`).toBe(1);
+    }
+  });
+});
+
+describe("ighForward / ighInverse — projection EPSG:152160 complète", () => {
+  const MINX = -19949750;
+  const MAXY = 8361000;
+
+  it("retrouve la valeur de référence de PROJ (builtins.gie, +a=6400000)", () => {
+    const scale = 6378137 / 6400000;
+    const [x, y] = ighForward(2, 1);
+    expect(x).toBeCloseTo(223878.497456 * scale, 3);
+    expect(y).toBeCloseTo(111701.072127 * scale, 3);
+  });
+
+  it("revient au point de départ sur la France, la Roumanie et tous les lobes", () => {
+    const points = [
+      [2.35, 48.85], [-1.55, 47.2], [7.75, 48.58], [5.37, 43.3], [-4.5, 48.4], [9.2, 41.9], // France
+      [26.1, 44.43], [23.6, 46.77], [28.65, 44.17], // Roumanie
+      [-100, 40.8], [-120, 60], [100, 70], [-70, 20], [100, 10], // lobes nord
+      [-160, -60], [-60, -15], [20, -30], [140, -60], [-110, -50], [170, -10], // lobes sud
+      [30, 40.7366], [30, 40.7367], [0, 0], [179.9, 85], [-179.9, -85],
+    ];
+    for (const [lon, lat] of points) {
+      const [x, y] = ighForward(lon, lat);
+      const back = ighInverse(x, y);
+      expect(back[0], `lon (${lon}, ${lat})`).toBeCloseTo(lon, 8);
+      expect(back[1], `lat (${lon}, ${lat})`).toBeCloseTo(lat, 8);
+    }
+  });
+
+  it("reste continue à la bascule sinusoïdale/Mollweide", () => {
+    const below = ighForward(10, 40.73661);
+    const above = ighForward(10, 40.73662);
+    expect(Math.hypot(above[0] - below[0], above[1] - below[1])).toBeLessThan(2);
+  });
+
+  it("renvoie null dans les interruptions de la carte et hors de la Terre", () => {
+    expect(ighInverse(-40.5 * (Math.PI / 180) * 6378137, 7000000)).toBeNull(); // nord Atlantique
+    expect(ighInverse(0, 9000000)).toBeNull();
+    expect(ighInverse(NaN, 0)).toBeNull();
+    expect(ighForward(181, 0)).toBeNull();
+    expect(ighForward(0, 91)).toBeNull();
+  });
+
+  it("place les bords mesurés sur ISRIC sur des bords de la grille WCS", () => {
+    // Écart toléré : 0.02 pixel, soit 5 m (imprécision de la bissection et de la mesure).
+    const distanceToEdge = (value) => Math.abs(value - Math.round(value));
+    for (const [lon, lat] of COL_EDGES) {
+      const [x] = ighForward(lon, lat);
+      expect(distanceToEdge((x - MINX) / 250), `colonne @(${lon},${lat})`).toBeLessThan(0.02);
+    }
+    for (const [lon, lat] of ROW_EDGES) {
+      const [, y] = ighForward(lon, lat);
+      expect(distanceToEdge((MAXY - y) / 250), `ligne @(${lon},${lat})`).toBeLessThan(0.02);
     }
   });
 });

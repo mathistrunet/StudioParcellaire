@@ -51,6 +51,8 @@ import { fetchSoilGridsVisibleGrid } from "../../services/soilgridsGridBackend";
 import { featureCollectionsEqual } from "../../utils/featureCollectionEquality";
 import {
   clearParcellesGeojson,
+  fetchLatestClearedBackup,
+  restoreParcellesBackup,
   saveParcellesGeojson,
   validateParcellesMatching,
 } from "../../services/parcellesBackend";
@@ -247,6 +249,7 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
     setFeatureCollection,
     reset: resetParcellesStore,
     loading: parcellesLoading,
+    error: parcellesLoadError,
   } = useParcelles();
 
   const { fillToponymieNames, isNaming: isToponymieNaming } = useToponymieAutoNaming(setFeatures);
@@ -315,6 +318,9 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
   const drawLayerAppliedFiltersRef = useRef(new Map());
   const toolbarScrollRef = useRef(null);
   const [backendReady, setBackendReady] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const [clearedBackup, setClearedBackup] = useState(null);
+  const [isRestoringBackup, setIsRestoringBackup] = useState(false);
   // Dernières collections poussées vers le backend et vers le store. Comparées
   // structurellement (`featureCollectionsEqual`) et non par sérialisation : deux
   // collections identiques produites par des codes différents ne donnent pas la
@@ -540,6 +546,9 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
    */
   useEffect(() => {
     if (parcellesLoading) return;
+    // Base illisible : l'enregistrement automatique reste coupé, sinon une modification
+    // sur une carte vide remplacerait le parcellaire stocké.
+    if (parcellesLoadError) return;
     if (hasHydratedRef.current) return;
     const nextCollection = parcellesCollection || emptyParcellesCollection;
     setDrawFeatures(nextCollection);
@@ -550,6 +559,7 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
   }, [
     parcellesCollection,
     parcellesLoading,
+    parcellesLoadError,
     emptyParcellesCollection,
     setDrawFeatures,
   ]);
@@ -573,6 +583,28 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
     void fillToponymieNames(polygones);
   }, [drawRef, setFeatures, fillToponymieNames]);
 
+  const refreshClearedBackup = useCallback(async (signal) => {
+    try {
+      setClearedBackup(await fetchLatestClearedBackup(signal));
+    } catch (error) {
+      if (error?.name !== "AbortError") console.warn("[PARCELLES_BACKUPS_FAILED]", error);
+    }
+  }, []);
+
+  const handleRestoreBackup = useCallback(async () => {
+    if (!clearedBackup) return;
+    setIsRestoringBackup(true);
+    try {
+      await restoreParcellesBackup(clearedBackup.id);
+      // Le draw n'est hydraté qu'une fois : le rechargement repart de la base restaurée.
+      window.location.reload();
+    } catch (error) {
+      setIsRestoringBackup(false);
+      console.warn("[PARCELLES_RESTORE_FAILED]", error);
+      alert("La restauration a échoué : le parcellaire n'a pas été modifié.");
+    }
+  }, [clearedBackup]);
+
   const handleResetParcelles = useCallback(async () => {
     setDrawFeatures(emptyParcellesCollection);
     lastSavedPayloadRef.current = emptyParcellesCollection;
@@ -580,11 +612,15 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
     resetParcellesStore();
     try {
       await clearParcellesGeojson();
+      setSaveFailed(false);
+      await refreshClearedBackup();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Erreur inconnue";
       console.warn(`[PARCELLES_RESET_FAILED] Réinitialisation backend impossible: ${message}`);
+      setSaveFailed(true);
     }
   }, [
+    refreshClearedBackup,
     emptyParcellesCollection,
     resetParcellesStore,
     setDrawFeatures,
@@ -602,10 +638,13 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
       saveParcellesGeojson(features, controller.signal)
         .then((collection) => {
           lastSavedPayloadRef.current = collection;
+          setSaveFailed(false);
         })
         .catch((error) => {
+          if (error?.name === "AbortError") return;
           const message = error instanceof Error ? error.message : "Erreur inconnue";
           console.warn(`[PARCELLES_SAVE_FAILED] Enregistrement impossible: ${message}`);
+          setSaveFailed(true);
         });
     }, 500);
 
@@ -614,6 +653,19 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
       clearTimeout(timeout);
     };
   }, [backendReady, buildCollectionFromFeatures, features]);
+
+  // Proposé tant que le parcellaire est vide, y compris à une ouverture ultérieure.
+  const isParcellaireEmpty = features.length === 0;
+  useEffect(() => {
+    if (!backendReady) return undefined;
+    if (!isParcellaireEmpty) {
+      setClearedBackup(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    void refreshClearedBackup(controller.signal);
+    return () => controller.abort();
+  }, [backendReady, isParcellaireEmpty, refreshClearedBackup]);
 
   /**
    * Report des parcelles vers le store. Sens unique : le store n'est jamais
@@ -713,7 +765,13 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
   );
 
   const ensureSoilGridsGridLayer = useCallback(() => {
-    if (!mapInstance || !mapInstance.isStyleLoaded()) return false;
+    if (!mapInstance) return false;
+    // isStyleLoaded() repasse à false dès qu'une propriété de couche change : testé en premier, il
+    // ferait abandonner le chargement de la grille au moment même où l'on coche son affichage.
+    if (mapInstance.getSource(SOILGRIDS_GRID_SOURCE_ID) && mapInstance.getLayer(SOILGRIDS_GRID_LAYER_ID)) {
+      return true;
+    }
+    if (!mapInstance.isStyleLoaded()) return false;
 
     if (!mapInstance.getSource(SOILGRIDS_GRID_SOURCE_ID)) {
       mapInstance.addSource(SOILGRIDS_GRID_SOURCE_ID, {
@@ -795,15 +853,18 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
     if (!mapInstance) return;
 
     if (!mapInstance.isStyleLoaded()) {
-      const onLoad = () => {
+      // "idle" et non "load" : le style peut être occupé alors que "load" est déjà passé. La grille
+      // cochée entre-temps n'a pas pu se charger, faute de couche : on la relance ici.
+      const onReady = () => {
         ensureSoilGridsGridLayer();
+        refreshSoilGridsGrid();
       };
-      mapInstance.once("load", onLoad);
-      return () => mapInstance.off("load", onLoad);
+      mapInstance.once("idle", onReady);
+      return () => mapInstance.off("idle", onReady);
     }
 
     ensureSoilGridsGridLayer();
-  }, [mapInstance, ensureSoilGridsGridLayer]);
+  }, [mapInstance, ensureSoilGridsGridLayer, refreshSoilGridsGrid]);
 
   useEffect(() => {
     if (!mapInstance || !mapInstance.getLayer(SOILGRIDS_GRID_LAYER_ID)) return;
@@ -1653,6 +1714,41 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
             <div id="map" style={{ position: "absolute", inset: 0 }} />
 
             <MapInfoPanel info={mapClickInfo} onClose={handleCloseInfoPanel} />
+
+            {!matchViewOpen && (parcellesLoadError || saveFailed) && (
+              <div className="fp-notice fp-notice--error" role="alert">
+                {parcellesLoadError
+                  ? "Parcellaire enregistré inaccessible. L'enregistrement est suspendu : relancez l'application avant de modifier quoi que ce soit."
+                  : "Enregistrement impossible : vos dernières modifications ne sont pas sauvegardées. Vérifiez que le serveur local tourne toujours."}
+              </div>
+            )}
+
+            {!matchViewOpen && isParcellaireEmpty && clearedBackup && !parcellesLoadError && (
+              <div className="fp-notice" role="status">
+                <span>
+                  Parcellaire effacé le {new Date(clearedBackup.createdAt).toLocaleString("fr-FR")}{" "}
+                  ({clearedBackup.featureCount} parcelle{clearedBackup.featureCount > 1 ? "s" : ""}).
+                </span>
+                <button
+                  type="button"
+                  className="fp-btn fp-btn--sm"
+                  onClick={handleRestoreBackup}
+                  disabled={isRestoringBackup}
+                >
+                  {isRestoringBackup ? "Restauration…" : "Restaurer"}
+                </button>
+                <button
+                  type="button"
+                  className="fp-modal__close"
+                  style={{ marginLeft: 0 }}
+                  onClick={() => setClearedBackup(null)}
+                  aria-label="Masquer"
+                  title="Masquer ce message"
+                >
+                  ×
+                </button>
+              </div>
+            )}
 
             {/* Écran d'accueil : première chose que voit un utilisateur qui ouvre
                 l'outil sans parcellaire. */}

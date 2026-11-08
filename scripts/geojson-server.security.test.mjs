@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -8,8 +8,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildAccessPolicy, getAccessDenial } from "./http-security.mjs";
 
-// Le vrai serveur tourne dans un dossier temporaire : DATA_DIR suit le répertoire de
-// travail, le parcellaire du poste n'est donc jamais touché par ces tests.
+// Le vrai serveur tourne dans un dossier temporaire et STUDIO_DATA_DIR y place sa base :
+// le parcellaire du poste n'est donc jamais touché par ces tests.
 const SERVER_SCRIPT = fileURLToPath(new URL("./geojson-server.mjs", import.meta.url));
 const MAX_BODY_BYTES = 2048;
 
@@ -44,7 +44,7 @@ function send({ method = "GET", url = "/api/parcelles", headers = {}, body, chun
 }
 
 const collectionWith = (id) => JSON.stringify({ type: "FeatureCollection", features: [{ id }] });
-const storedParcelles = async () => JSON.parse(await readFile(path.join(sandbox, "data", "parcelles.geojson"), "utf-8"));
+const storedParcelles = async () => JSON.parse((await send({})).body);
 const EVIL_ORIGIN = "https://evil.example";
 
 async function waitForServer() {
@@ -67,6 +67,7 @@ beforeAll(async () => {
     env: {
       ...process.env,
       PORT: String(port),
+      STUDIO_DATA_DIR: path.join(sandbox, "donnees"),
       STUDIO_MAX_BODY_BYTES: String(MAX_BODY_BYTES),
       STUDIO_HOST: "",
       STUDIO_ALLOWED_ORIGINS: "",

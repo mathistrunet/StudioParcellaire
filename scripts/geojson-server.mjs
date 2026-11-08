@@ -1,5 +1,5 @@
 import http from "node:http";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import {
   applyCorrespondencesAndMerge,
@@ -46,12 +46,12 @@ const PORT = Number(process.env.PORT || 4174);
 const HOST = process.env.STUDIO_HOST || DEFAULT_HOST;
 const ACCESS_POLICY = buildAccessPolicy({ port: PORT, extraOrigins: process.env.STUDIO_ALLOWED_ORIGINS });
 const MAX_BODY_BYTES = Number(process.env.STUDIO_MAX_BODY_BYTES) || DEFAULT_MAX_BODY_BYTES;
+// `data/` ne contient plus que les référentiels versionnés (et l'ancien parcellaire,
+// repris une seule fois) ; les données de l'utilisateur vivent dans APP_DATA_DIR.
 const DATA_DIR = path.resolve(process.cwd(), "data");
 // Application compilée : servie par ce même serveur quand elle existe, pour que le
 // lanceur n'ait qu'un seul processus à démarrer (pas de proxy /api à configurer).
 const DIST_DIR = path.resolve(process.cwd(), "dist");
-const DATA_FILE = path.join(DATA_DIR, "parcelles.geojson");
-const SOIL_MAPPING_FILE = path.join(DATA_DIR, "soil-type-mappings.json");
 const PUBLIC_DATA_DIR = path.resolve(process.cwd(), "public", "data");
 const SOILMAP_DEP_DIR = path.join(PUBLIC_DATA_DIR, "soilmap_dep");
 const TOPONYMIE_DIR = path.join(PUBLIC_DATA_DIR, "TOPONYMIE");
@@ -60,12 +60,33 @@ const POINT_STRATEGY = process.env.SOILGRIDS_POINT_STRATEGY || "centroid";
 const CALC_VERSION = "v1.6.0-upr";
 const WRB_CALC_VERSION = "wrb-v1";
 
+// Import dynamique : `node:sqlite` manque aux anciennes versions de Node, et le message
+// doit le dire au lieu d'une erreur de module. Sans base, mieux vaut ne pas démarrer que
+// laisser croire à un parcellaire vide.
+let parcelStore;
+let appDataDir;
+try {
+  const { openParcelStore, resolveAppDataDir } = await import("./storage/parcel-store.mjs");
+  appDataDir = resolveAppDataDir();
+  parcelStore = openParcelStore({
+    dataDir: appDataDir,
+    legacyDataDir: DATA_DIR,
+    onWarning: (message) => console.warn(`[STOCKAGE] ${message}`),
+  });
+} catch (error) {
+  console.error(
+    `[STOCKAGE] Base locale inaccessible : ${error?.message || error}\n` +
+      "Node.js 22.13 ou plus récent est requis (version LTS sur https://nodejs.org)."
+  );
+  process.exit(1);
+}
+
 const soilClient = new SoilGridsClient({ timeoutMs: 15_000, retries: 2 });
-const soilCacheRepository = new SoilGridsCacheRepository({ dataDir: DATA_DIR, ttlDays: 30 });
+const soilCacheRepository = new SoilGridsCacheRepository({ dataDir: appDataDir, ttlDays: 30 });
 // Cache léger dédié à la remontée WRB-seule (nom de classe par pixel), séparé du cache SoilGrids
 // complet pour éviter toute collision par parcel_id entre les deux modes.
-const wrbCacheRepository = new SoilGridsCacheRepository({ dataDir: DATA_DIR, ttlDays: 30, fileName: "parcel-wrb-cache.json" });
-const soilGridService = new SoilGridsGridService({ dataDir: DATA_DIR });
+const wrbCacheRepository = new SoilGridsCacheRepository({ dataDir: appDataDir, ttlDays: 30, fileName: "parcel-wrb-cache.json" });
+const soilGridService = new SoilGridsGridService({ dataDir: appDataDir });
 const inflightSoilRequests = new Map();
 const rateLimitWindow = [];
 // Un contour de parcelle tient largement dans cette limite, bien plus stricte que celle
@@ -75,30 +96,14 @@ const fetchRpgFeatures = createRpgWfsClient();
 const lookupToponym = createToponymLookup({ ensureLayer, queryGeoPackageByBbox });
 
 const emptyCollection = () => ({ type: "FeatureCollection", features: [] });
+const isFeatureCollection = (value) =>
+  value?.type === "FeatureCollection" && Array.isArray(value.features);
 const log = (type, payload) => console.info(`[${type}]`, JSON.stringify(payload));
 const handleEnrich = createEnrichHandler({
   enrich: (request) => enrichParcelle(request, { fetchRpgFeatures, lookupToponym }),
   maxBodyBytes: ENRICH_MAX_BODY_BYTES,
   onError: (error) => log("ENRICH_ERROR", { code: error?.code, message: error?.message || String(error) }),
 });
-
-async function ensureDataFile() {
-  await mkdir(DATA_DIR, { recursive: true });
-  try {
-    await readFile(DATA_FILE, "utf-8");
-  } catch {
-    await writeFile(DATA_FILE, JSON.stringify(emptyCollection(), null, 2));
-  }
-}
-
-async function ensureSoilMappingFile() {
-  await mkdir(DATA_DIR, { recursive: true });
-  try {
-    await readFile(SOIL_MAPPING_FILE, "utf-8");
-  } catch {
-    await writeFile(SOIL_MAPPING_FILE, JSON.stringify({ mappings: {} }, null, 2));
-  }
-}
 
 function normalizeSoilMappingsPayload(payload) {
   const source = payload && typeof payload === "object" ? payload : {};
@@ -143,38 +148,19 @@ function normalizeSoilMappingsPayload(payload) {
 }
 
 async function readSoilMappings() {
-  await ensureSoilMappingFile();
-  const raw = await readFile(SOIL_MAPPING_FILE, "utf-8");
-  try {
-    const parsed = JSON.parse(raw);
-    return normalizeSoilMappingsPayload(parsed);
-  } catch {
-    // ignore
-  }
-  return { mappings: {} };
+  return normalizeSoilMappingsPayload(parcelStore.readSoilMappings());
 }
 
 async function writeSoilMappings(payload) {
-  await ensureSoilMappingFile();
-  const normalized = normalizeSoilMappingsPayload(payload);
-  await writeFile(SOIL_MAPPING_FILE, JSON.stringify(normalized, null, 2));
+  parcelStore.writeSoilMappings(normalizeSoilMappingsPayload(payload));
 }
 
 async function readCollection() {
-  await ensureDataFile();
-  const raw = await readFile(DATA_FILE, "utf-8");
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && parsed.type === "FeatureCollection") return parsed;
-  } catch {
-    // ignore
-  }
-  return emptyCollection();
+  return parcelStore.readCollection();
 }
 
 async function writeCollection(collection) {
-  await ensureDataFile();
-  await writeFile(DATA_FILE, JSON.stringify(collection, null, 2));
+  parcelStore.writeCollection(collection);
 }
 
 const parseUrl = (requestUrl) => new URL(requestUrl, "http://localhost");
@@ -801,6 +787,42 @@ const handleRequest = async (req, res) => {
     return;
   }
 
+  if (requestUrl.pathname.startsWith("/api/parcelles/backups")) {
+    if (prepareApiResponse(req, res, ["GET", "POST"])) return;
+    const restoreMatch = requestUrl.pathname.match(/^\/api\/parcelles\/backups\/(\d+)\/restore$/);
+    if (restoreMatch && req.method === "POST") {
+      const restored = parcelStore.restoreBackup(Number(restoreMatch[1]));
+      res.writeHead(restored ? 200 : 404);
+      res.end(JSON.stringify(restored ?? { error: "Sauvegarde introuvable." }));
+      return;
+    }
+    if (requestUrl.pathname === "/api/parcelles/backups" && req.method === "GET") {
+      res.writeHead(200);
+      res.end(JSON.stringify({ backups: parcelStore.listBackups() }));
+      return;
+    }
+    if (requestUrl.pathname === "/api/parcelles/backups" && req.method === "POST") {
+      try {
+        const payload = JSON.parse(await readBody(req, MAX_BODY_BYTES));
+        const reason = String(payload?.reason || "").trim().slice(0, 40);
+        if (!reason || !isFeatureCollection(payload?.collection)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Sauvegarde invalide." }));
+          return;
+        }
+        const id = parcelStore.createBackup(payload.collection, reason);
+        res.writeHead(201);
+        res.end(JSON.stringify({ id }));
+      } catch (error) {
+        sendBodyError(req, res, error);
+      }
+      return;
+    }
+    res.writeHead(405);
+    res.end(JSON.stringify({ error: "Method not allowed." }));
+    return;
+  }
+
   if (requestUrl.pathname.startsWith("/api/parcelles")) {
     if (prepareApiResponse(req, res, ["GET", "PUT", "POST"])) return;
     if (req.method === "GET") return void res.writeHead(200).end(JSON.stringify(await readCollection()));
@@ -865,7 +887,7 @@ const handleRequest = async (req, res) => {
     if (req.method === "PUT") {
       try {
         const parsed = JSON.parse(await readBody(req, MAX_BODY_BYTES));
-        if (!parsed || parsed.type !== "FeatureCollection") {
+        if (!isFeatureCollection(parsed)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Invalid FeatureCollection payload." }));
           return;
@@ -942,5 +964,6 @@ server.listen(PORT, HOST, () => {
 process.on("exit", () => {
   closeGeoPackageCache();
   closeRpgRomaniaCache();
+  parcelStore.close();
 });
 
