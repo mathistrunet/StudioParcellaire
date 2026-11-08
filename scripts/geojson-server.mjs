@@ -11,6 +11,7 @@ import {
   parseSoilGridsProperties,
 } from "../src/services/soilgrids.js";
 import { classifyParcelUpr } from "../src/services/uprClassification.js";
+import { TOPONYMIE_FILES } from "../src/domain/toponymie/regions.js";
 import { SoilGridsClient, SoilGridsError } from "./soilgrids/SoilGridsClient.mjs";
 import { SoilGridsCacheRepository } from "./soilgrids/SoilGridsCacheRepository.mjs";
 import { SoilGridsGridService } from "./soilgrids/SoilGridsGridService.mjs";
@@ -29,6 +30,10 @@ import {
   sendBodyError,
 } from "./http-security.mjs";
 import { ensureDatasetForBbox, ensureLayer } from "./layer-store.mjs";
+import { enrichParcelle } from "./enrich/enrich-service.mjs";
+import { createEnrichHandler } from "./enrich/enrich-route.mjs";
+import { createRpgWfsClient } from "./enrich/rpg-wfs-client.mjs";
+import { createToponymLookup } from "./enrich/toponym-lookup.mjs";
 import {
   applyLayerUpdates,
   getLayerUpdateReport,
@@ -63,24 +68,19 @@ const wrbCacheRepository = new SoilGridsCacheRepository({ dataDir: DATA_DIR, ttl
 const soilGridService = new SoilGridsGridService({ dataDir: DATA_DIR });
 const inflightSoilRequests = new Map();
 const rateLimitWindow = [];
+// Un contour de parcelle tient largement dans cette limite, bien plus stricte que celle
+// d'un parcellaire complet : l'endpoint est sans état, rien ne justifie un gros corps.
+const ENRICH_MAX_BODY_BYTES = Math.min(MAX_BODY_BYTES, 5 * 1024 * 1024);
+const fetchRpgFeatures = createRpgWfsClient();
+const lookupToponym = createToponymLookup({ ensureLayer, queryGeoPackageByBbox });
 
 const emptyCollection = () => ({ type: "FeatureCollection", features: [] });
 const log = (type, payload) => console.info(`[${type}]`, JSON.stringify(payload));
-
-const TOPONYMIE_FILES = {
-  ARA: "TOPONYMIE_ARA.gpkg",
-  BFC: "TOPONYMIE_BFC.gpkg",
-  BRATAGNE: "TOPONYMIE_Bratagne.gpkg",
-  CENTRE: "TOPONYMIE_Centre.gpkg",
-  GEST: "TOPONYMIE_GEst.gpkg",
-  HDF: "TOPONYMIE_HDF.gpkg",
-  IDF: "TOPONYMIE_IDF.gpkg",
-  NAQUITAINE: "TOPONYMIE_NAquitaine.gpkg",
-  NORMANDIE: "TOPONYMIE_Normandie.gpkg",
-  OCCITANIE: "TOPONYMIE_Occitanie.gpkg",
-  PACA: "TOPONYMIE_PACA.gpkg",
-  PDL: "TOPONYMIE_PDL.gpkg",
-};
+const handleEnrich = createEnrichHandler({
+  enrich: (request) => enrichParcelle(request, { fetchRpgFeatures, lookupToponym }),
+  maxBodyBytes: ENRICH_MAX_BODY_BYTES,
+  onError: (error) => log("ENRICH_ERROR", { code: error?.code, message: error?.message || String(error) }),
+});
 
 async function ensureDataFile() {
   await mkdir(DATA_DIR, { recursive: true });
@@ -540,6 +540,8 @@ const handleRequest = async (req, res) => {
   }
 
   const requestUrl = parseUrl(req.url);
+
+  if (requestUrl.pathname === "/api/v1/enrich") return handleEnrich(req, res);
 
   if (requestUrl.pathname.startsWith("/api/parcels/") && requestUrl.pathname.endsWith("/soilgrids")) {
     if (prepareApiResponse(req, res, ["GET"])) return;

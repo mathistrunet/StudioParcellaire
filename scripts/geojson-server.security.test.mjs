@@ -246,3 +246,27 @@ describe("buildAccessPolicy", () => {
     expect(getAccessDenial(request({}), buildAccessPolicy({ port: 4174 }))).not.toBeNull();
   });
 });
+
+describe("POST /api/v1/enrich sur le vrai serveur", () => {
+  const ENRICH = { method: "POST", url: "/api/v1/enrich" };
+
+  it("applique les règles d'accès communes", async () => {
+    const refused = await send({ ...ENRICH, headers: { origin: EVIL_ORIGIN }, body: "{}" });
+    expect(refused.status).toBe(403);
+  });
+
+  it("valide le corps sans appeler le WFS", async () => {
+    const invalid = await send({ ...ENRICH, body: JSON.stringify({ millesimes: [2025] }) });
+    expect(invalid.status).toBe(400);
+    expect(JSON.parse(invalid.body).code).toBe("GEOMETRIE_INVALIDE");
+  });
+
+  it("borne la taille du corps", async () => {
+    const tooLarge = await send({ ...ENRICH, body: "x".repeat(MAX_BODY_BYTES + 1) });
+    expect(tooLarge.status).toBe(413);
+  });
+
+  it("refuse une autre méthode", async () => {
+    expect((await send({ url: ENRICH.url })).status).toBe(405);
+  });
+});

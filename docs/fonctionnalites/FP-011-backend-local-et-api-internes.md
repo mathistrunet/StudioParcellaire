@@ -17,6 +17,7 @@ Fournir une couche locale simple de persistance et de services pour supporter l'
 - acces grille SoilGrids
 - lecture GeoPackage sols
 - lecture GeoPackage toponymie
+- enrichissement sans etat d'une parcelle : `POST /api/v1/enrich`, contrat dans `docs/api/openapi-v1.json`, service dans `scripts/enrich/`
 
 ## Attendus fonctionnels
 
@@ -48,6 +49,8 @@ Fournir une couche locale simple de persistance et de services pour supporter l'
 ## Limites / dette
 
 - pas de concurrence multi-utilisateur
+- `POST /api/v1/enrich` : environ 10 s par appel quand le nom est demande (lecture du GeoPackage de toponymie) ; l'interface s'en passe avec `inclure_nom: false`
+- `POST /api/v1/enrich` : `bio` n'est connu que si 2025 figure dans les millesimes demandes, et le WFS limite le debit (requetes espacees et `Retry-After` respecte par `scripts/enrich/rpg-wfs-client.mjs`)
 
 ## Evolutions recommandees
 

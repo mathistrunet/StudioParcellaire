@@ -1969,7 +1969,6 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
                     selectedId={selectedId}
                     onSelect={(id) => selectFeatureOnMap(id, true)}
                     drawRef={drawRef}
-                    mapRef={mapRef}
                     csvValues={csvValues}
                     onCsvValuesChange={setCsvValues}
                     millesimeAction={millesimeAction}

@@ -1,6 +1,5 @@
 // src/components/ParcelleEditor.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import centroid from "@turf/centroid";
 import {
   entriesCodebook,
   labelFromCode,
@@ -9,11 +8,11 @@ import {
   resolvePrecisionForCode,
 } from "../utils/cultureLabels";
 import { featureAreaM2 } from "../utils/geometry";
-import { fetchRpgGeoJSON, getCultureLabel, getMapBoundsCRS84 } from "../services/rpg";
+import { RPG_AVAILABLE_YEARS } from "../domain/rpg/rpgLayers.js";
+import { enrichParcelles } from "../services/enrich";
 import { fetchParcelSoilGrids, fetchParcelWrb } from "../services/soilgridsBackend";
 import { saveParcellesGeojson } from "../services/parcellesBackend";
 import ParcelSoilPanel from "./ParcelSoilPanel";
-import { RPG_MIN_ZOOM } from "../Front/useRpgLayer";
 import {
   CULTURE_COLUMNS,
   clearCulture,
@@ -121,8 +120,6 @@ const buildEmptyTypedState = () =>
     return acc;
   }, {});
 
-const RPG_AVAILABLE_YEARS = [2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018];
-
 /**
  * Année de campagne représentée par la colonne « Culture N ».
  *
@@ -147,89 +144,14 @@ const getRpgYearForColumn = (columnId, baseYear) => {
   return baseYear + column.offset;
 };
 
-function pointInRing(point, ring) {
-  if (!Array.isArray(point) || point.length < 2) return false;
-  if (!Array.isArray(ring) || ring.length < 4) return false;
-  const x = point[0];
-  const y = point[1];
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i]?.[0];
-    const yi = ring[i]?.[1];
-    const xj = ring[j]?.[0];
-    const yj = ring[j]?.[1];
-    if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) {
-      continue;
-    }
-    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
+const isSurfaceGeometry = (geometry) =>
+  geometry?.type === "Polygon" || geometry?.type === "MultiPolygon";
 
-function pointInPolygon(point, polygon) {
-  if (!Array.isArray(polygon) || polygon.length === 0) return false;
-  if (!pointInRing(point, polygon[0])) return false;
-  for (let i = 1; i < polygon.length; i += 1) {
-    if (pointInRing(point, polygon[i])) return false;
-  }
-  return true;
-}
-
-function pointInGeometry(point, geometry) {
-  if (!geometry) return false;
-  if (geometry.type === "Polygon") {
-    return pointInPolygon(point, geometry.coordinates);
-  }
-  if (geometry.type === "MultiPolygon") {
-    return geometry.coordinates?.some((poly) => pointInPolygon(point, poly));
-  }
-  return false;
-}
-
-function computeGeometryBbox(geometry) {
-  if (!geometry) return null;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-
-  const register = (coord) => {
-    if (!Array.isArray(coord) || coord.length < 2) return;
-    const x = coord[0];
-    const y = coord[1];
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-  };
-
-  const walkRing = (ring) => {
-    if (!Array.isArray(ring)) return;
-    ring.forEach(register);
-  };
-
-  const walkPolygon = (polygon) => {
-    if (!Array.isArray(polygon)) return;
-    polygon.forEach(walkRing);
-  };
-
-  if (geometry.type === "Polygon") {
-    walkPolygon(geometry.coordinates);
-  } else if (geometry.type === "MultiPolygon") {
-    geometry.coordinates?.forEach(walkPolygon);
-  }
-
-  if (!Number.isFinite(minX)) return null;
-  return [minX, minY, maxX, maxY];
-}
-
-function buildRpgIndex(features) {
-  if (!Array.isArray(features)) return [];
-  return features
-    .map((feature) => ({ feature, bbox: computeGeometryBbox(feature?.geometry) }))
-    .filter((item) => Array.isArray(item.bbox));
+/** Traduit un code RPG en code et précision du tableau de cultures. */
+function resolveRpgCulture(rpgCode) {
+  const split = splitCultureKey(rpgCode);
+  const code = split.code || rpgCode;
+  return { code, precision: resolvePrecisionForCode(code, split.precision) };
 }
 
 /**
@@ -540,7 +462,6 @@ export default function ParcelleEditor({
   setFeatures,
   selectedId,
   onSelect,
-  mapRef,
   onFillNames,
   isFillingNames = false,
   millesimeAction = null,
@@ -831,71 +752,72 @@ export default function ParcelleEditor({
       return;
     }
 
-    const map = mapRef?.current;
-    if (!map) {
-      alert("Carte indisponible pour consulter le RPG.");
-      return;
-    }
-    if (typeof map.getZoom === "function" && map.getZoom() < RPG_MIN_ZOOM) {
-      alert(`Zoome jusqu'a ${RPG_MIN_ZOOM} pour interroger le RPG.`);
+    // Le remplissage suit l'affichage du tableau : une parcelle masquée par un filtre
+    // ne doit pas être modifiée à l'insu de l'utilisateur. Il ne dépend pas de la carte.
+    const targets = features
+      .map((feature, index) => ({ feature, idKey: String(feature?.id ?? index) }))
+      .filter(({ feature, idKey }) => visibleIdKeys.has(idKey) && isSurfaceGeometry(feature?.geometry));
+    if (!targets.length) {
+      alert("Aucune parcelle avec un contour a remplir.");
       return;
     }
 
     setIsFillingRpg(true);
     try {
-      const bbox = getMapBoundsCRS84(map);
-      const gj = await fetchRpgGeoJSON(targetYear, bbox, 5000);
-      const rpgFeatures = Array.isArray(gj?.features) ? gj.features : [];
-      if (!rpgFeatures.length) {
-        alert(`Aucune parcelle RPG ${targetYear} n'a ete trouvee dans la zone affichee.`);
-        return;
+      const outcomes = await enrichParcelles(
+        targets.map(({ feature }) => feature.geometry),
+        // Le nom n'est pas utilisé ici : inutile de déclencher le chargement de la toponymie.
+        { millesimes: [targetYear], inclureNom: false }
+      );
+
+      const updates = new Map();
+      let errorCount = 0;
+      let noMatchCount = 0;
+      outcomes.forEach(({ result, error }, position) => {
+        const culture = result?.cultures?.[String(targetYear)];
+        if (error || culture?.statut === "erreur_wfs") {
+          errorCount += 1;
+        } else if (culture?.statut === "trouve" && culture.code) {
+          updates.set(targets[position].idKey, resolveRpgCulture(culture.code));
+        } else {
+          noMatchCount += 1;
+        }
+      });
+
+      if (updates.size) {
+        // La réponse peut prendre du temps : on repart de l'état courant pour ne pas
+        // écraser une saisie faite entre-temps.
+        setFeatures((prev) =>
+          (prev || []).map((feature, index) => {
+            const update = updates.get(String(feature?.id ?? index));
+            if (!update) return feature;
+            return {
+              ...feature,
+              properties: setCulture(feature.properties, column, update.code, update.precision),
+            };
+          })
+        );
+        setTyped((prev) => {
+          const next = { ...prev, [column.id]: { ...(prev[column.id] || {}) } };
+          updates.forEach((update, idKey) => {
+            next[column.id][idKey] = resolveCultureDisplay(
+              setCulture({}, column, update.code, update.precision),
+              column
+            );
+          });
+          return next;
+        });
       }
 
-      const rpgIndex = buildRpgIndex(rpgFeatures);
-      const nextFeatures = features.map((feature, index) => {
-        if (!feature?.geometry) return feature;
-        // Le remplissage suit l'affichage : une parcelle masquée par un filtre
-        // ne doit pas être modifiée à l'insu de l'utilisateur.
-        if (!visibleIdKeys.has(String(feature.id ?? index))) return feature;
-        const center = centroid(feature)?.geometry?.coordinates;
-        if (!center || !Array.isArray(center)) return feature;
-
-        const hitEntry = rpgIndex.find((entry) => {
-          const bboxEntry = entry.bbox;
-          if (!bboxEntry) return false;
-          const [minX, minY, maxX, maxY] = bboxEntry;
-          if (center[0] < minX || center[0] > maxX || center[1] < minY || center[1] > maxY) {
-            return false;
-          }
-          return pointInGeometry(center, entry.feature?.geometry);
-        });
-
-        if (!hitEntry) return feature;
-        const { label, code } = getCultureLabel(hitEntry.feature?.properties || {});
-        const resolvedKey = code || codeFromLabel(label) || label;
-        const split = splitCultureKey(resolvedKey);
-        const resolvedCode = split.code || resolvedKey;
-        if (!resolvedCode) return feature;
-
-        const resolvedPrecision = resolvePrecisionForCode(resolvedCode, split.precision);
-        return {
-          ...feature,
-          properties: setCulture(feature.properties, column, resolvedCode, resolvedPrecision),
-        };
-      });
-
-      setFeatures(nextFeatures);
-
-      setTyped((prev) => {
-        const next = { ...prev, [column.id]: { ...(prev[column.id] || {}) } };
-        nextFeatures.forEach((feature, idx) => {
-          const idKey = String(feature.id ?? idx);
-          const props = feature.properties || {};
-          if (!hasCultureValue(props, column)) return;
-          next[column.id][idKey] = resolveCultureDisplay(props, column);
-        });
-        return next;
-      });
+      if (errorCount === targets.length) {
+        alert("Le service RPG est indisponible. Reessaie dans quelques instants.");
+      } else if (errorCount > 0) {
+        alert(
+          `RPG ${targetYear} : ${updates.size} parcelle(s) remplie(s), ${noMatchCount} sans correspondance, ${errorCount} en erreur (a relancer).`
+        );
+      } else if (!updates.size) {
+        alert(`Aucune parcelle RPG ${targetYear} ne correspond a ces contours.`);
+      }
     } catch (error) {
       console.error("[RPG] Remplissage automatique echoue:", error);
       alert("Erreur lors du chargement RPG. Consulte la console pour le detail.");

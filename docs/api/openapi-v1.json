@@ -1,0 +1,233 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "API Studio Parcellaire",
+    "version": "1.0.0",
+    "description": "Enrichissement sans état d'une parcelle à partir d'un point ou d'un contour. Rien n'est conservé côté serveur. Une évolution incompatible du contrat passe par un nouveau préfixe (/api/v2)."
+  },
+  "servers": [{ "url": "http://localhost:4174", "description": "Serveur local" }],
+  "paths": {
+    "/api/v1/enrich": {
+      "post": {
+        "operationId": "enrichParcelle",
+        "summary": "Enrichit une parcelle depuis le RPG et la toponymie",
+        "description": "Un point retient la parcelle RPG qui le contient. Un contour retient la parcelle RPG de plus grande intersection de surface, à condition qu'elle couvre au moins 20 % de la plus petite des deux surfaces. Le statut indique si une correspondance existe : une absence de parcelle n'est pas une erreur HTTP.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EnrichRequest" },
+              "examples": {
+                "point": {
+                  "value": { "geometry": { "type": "Point", "coordinates": [1.6, 48.2] }, "millesimes": [2025, 2024] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enrichissement réalisé. Lire `statut` et `cultures` : la réponse peut être partielle ou sans correspondance.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EnrichResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Corps invalide. Codes : JSON_INVALIDE, CORPS_INVALIDE, GEOMETRIE_INVALIDE, GEOMETRIE_TROP_ETENDUE, MILLESIMES_INVALIDES.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "403": {
+            "description": "Origine ou en-tête Host non autorisés.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "405": {
+            "description": "Méthode non prise en charge.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "413": {
+            "description": "Corps supérieur à 5 Mo.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": {
+            "description": "Erreur interne. Code : ERREUR_INTERNE.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "502": {
+            "description": "Aucun millésime interrogé n'a pu être lu : le WFS est en erreur. Code : WFS_INDISPONIBLE.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "504": {
+            "description": "Aucun millésime interrogé n'a répondu à temps. Code : WFS_TIMEOUT.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EnrichRequest": {
+        "type": "object",
+        "required": ["geometry", "millesimes"],
+        "additionalProperties": false,
+        "properties": {
+          "geometry": {
+            "description": "Géométrie GeoJSON en [longitude, latitude] (WGS 84). L'emprise ne doit pas dépasser 0,1° de côté.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/GeoJsonPoint" },
+              { "$ref": "#/components/schemas/GeoJsonPolygon" },
+              { "$ref": "#/components/schemas/GeoJsonMultiPolygon" }
+            ]
+          },
+          "millesimes": {
+            "type": "array",
+            "description": "Années RPG demandées. Une année non publiée ressort avec le statut millesime_indisponible.",
+            "minItems": 1,
+            "maxItems": 15,
+            "items": { "type": "integer" }
+          },
+          "inclure_nom": {
+            "type": "boolean",
+            "default": true,
+            "description": "false évite la recherche du nom, et le téléchargement éventuel de la couche de toponymie."
+          }
+        }
+      },
+      "EnrichResponse": {
+        "type": "object",
+        "required": ["statut", "contour", "contour_millesime", "surface_ha", "nom", "cultures", "bio", "irrigable", "type_sol", "avertissements"],
+        "additionalProperties": false,
+        "properties": {
+          "statut": {
+            "type": "string",
+            "enum": ["ok", "partiel", "aucune_correspondance"],
+            "description": "ok : parcelle trouvée pour tous les millésimes. partiel : trouvée pour une partie seulement, ou au moins un millésime en erreur. aucune_correspondance : aucun millésime lu ne contient de parcelle correspondante."
+          },
+          "contour": {
+            "nullable": true,
+            "description": "Contour RPG du millésime trouvé le plus récent.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/GeoJsonPolygon" },
+              { "$ref": "#/components/schemas/GeoJsonMultiPolygon" }
+            ]
+          },
+          "contour_millesime": { "type": "integer", "nullable": true },
+          "surface_ha": {
+            "type": "number",
+            "nullable": true,
+            "description": "Surface RPG (surf_parc) du millésime trouvé le plus récent, ou surface calculée sur son contour. null sans correspondance."
+          },
+          "nom": {
+            "type": "string",
+            "nullable": true,
+            "description": "Toponyme le plus proche, suffixé « bordure » sous 0,15 ha. null si inclure_nom vaut false, hors couverture ou si la toponymie est indisponible (voir avertissements)."
+          },
+          "cultures": {
+            "type": "object",
+            "description": "Résultat par millésime demandé, indexé par l'année.",
+            "additionalProperties": { "$ref": "#/components/schemas/CultureMillesime" }
+          },
+          "bio": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Conduite biologique. Seul le schéma 2025 porte ce champ : null (inconnu) si aucun millésime trouvé ne le renseigne."
+          },
+          "irrigable": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Réservé : toujours null tant que la donnée n'est pas alimentée."
+          },
+          "type_sol": {
+            "type": "string",
+            "nullable": true,
+            "description": "Réservé : toujours null tant que la donnée n'est pas alimentée."
+          },
+          "avertissements": {
+            "type": "array",
+            "description": "Réserves sur le résultat. Codes : RPG_TRONQUE, INTERSECTION_PARTIELLE, TOPONYMIE_INDISPONIBLE.",
+            "items": {
+              "type": "object",
+              "required": ["code", "message"],
+              "additionalProperties": false,
+              "properties": {
+                "code": { "type": "string" },
+                "message": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "CultureMillesime": {
+        "type": "object",
+        "required": ["statut"],
+        "additionalProperties": false,
+        "description": "Les autres champs ne sont présents que selon le statut : `erreur` pour erreur_wfs, les champs de culture pour trouve.",
+        "properties": {
+          "statut": {
+            "type": "string",
+            "enum": ["trouve", "aucune_correspondance", "millesime_indisponible", "erreur_wfs"]
+          },
+          "code": { "type": "string", "nullable": true, "description": "Code culture RPG (code_cultu)." },
+          "groupe": { "type": "string", "nullable": true, "description": "Groupe de cultures (code_group)." },
+          "precision": { "type": "string", "nullable": true, "description": "Précision culture, publiée dans le schéma 2025." },
+          "surface_ha": { "type": "number", "nullable": true },
+          "id_parcelle": { "type": "string", "nullable": true, "description": "Identifiant RPG (id_parcel, ou num_parcel en 2025)." },
+          "recouvrement": {
+            "type": "number",
+            "nullable": true,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Part du contour fourni couverte par la parcelle RPG. null pour un point."
+          },
+          "erreur": {
+            "type": "string",
+            "enum": ["WFS_TIMEOUT", "WFS_HTTP", "WFS_RESEAU", "WFS_REPONSE_INVALIDE"]
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "code": { "type": "string" }
+        }
+      },
+      "GeoJsonPoint": {
+        "type": "object",
+        "required": ["type", "coordinates"],
+        "properties": {
+          "type": { "type": "string", "enum": ["Point"] },
+          "coordinates": { "type": "array", "minItems": 2, "items": { "type": "number" } }
+        }
+      },
+      "GeoJsonPolygon": {
+        "type": "object",
+        "required": ["type", "coordinates"],
+        "properties": {
+          "type": { "type": "string", "enum": ["Polygon"] },
+          "coordinates": {
+            "type": "array",
+            "items": { "type": "array", "minItems": 4, "items": { "type": "array", "minItems": 2, "items": { "type": "number" } } }
+          }
+        }
+      },
+      "GeoJsonMultiPolygon": {
+        "type": "object",
+        "required": ["type", "coordinates"],
+        "properties": {
+          "type": { "type": "string", "enum": ["MultiPolygon"] },
+          "coordinates": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": { "type": "array", "minItems": 4, "items": { "type": "array", "minItems": 2, "items": { "type": "number" } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

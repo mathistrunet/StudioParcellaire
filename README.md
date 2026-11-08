@@ -65,6 +65,17 @@ que sur un réseau de confiance.
 STUDIO_HOST=0.0.0.0 STUDIO_ALLOWED_ORIGINS=http://192.168.1.10:4174 npm run backend
 ```
 
+### API d'enrichissement
+
+`POST /api/v1/enrich` enrichit une parcelle à partir d'un point ou d'un contour :
+contour et surface RPG, nom, cultures par millésime, conduite bio. Rien n'est
+conservé côté serveur. Le contrat est dans
+[`docs/api/openapi-v1.json`](docs/api/openapi-v1.json).
+
+```bash
+curl -X POST http://localhost:4174/api/v1/enrich -H "Content-Type: application/json" -d '{"geometry":{"type":"Point","coordinates":[1.6,48.2]},"millesimes":[2025,2024]}'
+```
+
 ## Fonctionnement de l'outil
 
 Le bouton **Guide**, en haut à droite de l'application, ouvre une fenêtre qui
