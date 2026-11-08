@@ -59,7 +59,7 @@ Fonctions disponibles :
 - filtrage par annee
 - filtrage par groupe `layerType`
 - stockage temporaire local via `localStorage`
-- persistance backend dans `data/parcelles.geojson`
+- persistance backend dans une base SQLite (`%APPDATA%StudioParcellaireparcellaire.db`)
 
 Comportements constates :
 
@@ -235,7 +235,7 @@ API identifiees :
 
 Stockages fichiers identifies :
 
-- `data/parcelles.geojson`
+- `%APPDATA%StudioParcellaireparcellaire.db`
 - `data/soil-type-mappings.json`
 - `data/parcel-soilgrids-cache.json`
 
