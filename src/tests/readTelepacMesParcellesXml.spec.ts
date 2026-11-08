@@ -4,14 +4,14 @@ import type { TelepacFeature } from '../lib/types/telepac';
 
 const SAMPLE_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <producteurs xmlns="urn:x-telepac:fr.gouv.agriculture.telepac:echange-producteur-import" xmlns:gml="http://www.opengis.net/gml">
-  <producteur numero-pacage="018003509">
+  <producteur numero-pacage="099999998">
     <rpg>
       <ilots>
-        <ilot numero-ilot="3" numero-ilot-reference="018015876118">
+        <ilot numero-ilot="3" numero-ilot-reference="099999998003">
           <commune>18173</commune>
           <justification>
             <motifOperation>ILOT_M2</motifOperation>
-            <justification>Photo aérienne ne reflétant pas le terrain. Modification du dessin pour correspondre aux évolutions du terrain.</justification>
+            <justification>Justification fictive de test.</justification>
           </justification>
           <parcelles>
             <parcelle>
@@ -119,7 +119,7 @@ describe('readTelepacMesParcellesXml', () => {
     expect(first.properties.precision).toBe('001');
     expect(first.properties.culture_secondaire).toBe('A00');
     expect(first.properties.justification_motif).toBe('ILOT_M2');
-    expect(first.properties.justification_texte).toContain('Photo aérienne');
+    expect(first.properties.justification_texte).toContain('Justification fictive');
 
     expect(second.properties.production_semences).toBe(true);
     expect(second.properties.deshydratation).toBe(true);

@@ -2,37 +2,37 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { parseParcellesCsvToFeatures, buildParcellesCsv } from "./parcellesCsv";
 import {
-  SEBASTIEN_CSV_TEXT,
-  SEBASTIEN_CSV_EXPECTED_COUNT,
-  SEBASTIEN_CSV_EXPECTED_NAMES,
-  SEBASTIEN_CSV_EXPECTED_SURFACES,
-} from "../__fixtures__/sebastien-2025.csv.js";
+  EXEMPLE_CSV_TEXT,
+  EXEMPLE_CSV_EXPECTED_COUNT,
+  EXEMPLE_CSV_EXPECTED_NAMES,
+  EXEMPLE_CSV_EXPECTED_SURFACES,
+} from "../__fixtures__/exploitation-exemple-2025.csv.js";
 
 // parseParcellesCsvToFeatures uses FileReader — File is available in jsdom
 function makeFile(text, name = "test.csv") {
   return new File([text], name, { type: "text/csv" });
 }
 
-describe("parseParcellesCsvToFeatures — fixture Sébastien 2025", () => {
-  it(`parse exactement ${SEBASTIEN_CSV_EXPECTED_COUNT} parcelles`, async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
-    expect(features).toHaveLength(SEBASTIEN_CSV_EXPECTED_COUNT);
+describe("parseParcellesCsvToFeatures — fixture exploitation fictive 2025", () => {
+  it(`parse exactement ${EXEMPLE_CSV_EXPECTED_COUNT} parcelles`, async () => {
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
+    expect(features).toHaveLength(EXEMPLE_CSV_EXPECTED_COUNT);
   });
 
   it("extrait les noms de parcelles", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     const names = features.map((f) => f.properties.nom);
-    expect(names).toEqual(SEBASTIEN_CSV_EXPECTED_NAMES);
+    expect(names).toEqual(EXEMPLE_CSV_EXPECTED_NAMES);
   });
 
   it("extrait les surfaces", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     const surfaces = features.map((f) => f.properties.surface_parcelle);
-    expect(surfaces).toEqual(SEBASTIEN_CSV_EXPECTED_SURFACES);
+    expect(surfaces).toEqual(EXEMPLE_CSV_EXPECTED_SURFACES);
   });
 
   it("produit des géométries Polygon WGS84 valides", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     features.forEach((f) => {
       expect(f.type).toBe("Feature");
       expect(f.geometry.type).toBe("Polygon");
@@ -72,14 +72,14 @@ A;Test;000;P3;3;Non;;TRN;;;;;invalide
   });
 
   it("extrait le code exploitation / numéro pacage", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     features.forEach((f) => {
-      expect(f.properties.code_exploitation).toBe("082012345");
+      expect(f.properties.code_exploitation).toBe("099999997");
     });
   });
 
   it("extrait les cultures N et N-1", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     // Parcelle 1 : BTH + TRN (N-1)
     const p1 = features[0];
     expect(p1.properties.cultureN).toBeTruthy();
@@ -88,7 +88,7 @@ A;Test;000;P3;3;Non;;TRN;;;;;invalide
   });
 
   it("marque la parcelle bio correctement (Oui/Non)", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     expect(features[2].properties.parcelle_bio).toBe("Oui");
     expect(features[0].properties.parcelle_bio).toBe("Non");
   });
@@ -192,7 +192,7 @@ TEST;Expl;000111;P1;1.5;non;Limon;oui;Blé tendre;;;;;1.35,44.01 1.36,44.01 1.36
   });
 
   it("round-trip: parseParcellesCsvToFeatures ∘ buildParcellesCsv conserve les données", async () => {
-    const originalFeatures = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const originalFeatures = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     const csv = await buildParcellesCsv(originalFeatures, "", "", "");
     const reparsed = await parseParcellesCsvToFeatures(makeFile(csv));
     expect(reparsed).toHaveLength(originalFeatures.length);
