@@ -8,7 +8,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 // Le composant crée des popups MapLibre : on les remplace par une coquille qui
 // retient l'élément DOM, ce qui permet de cliquer « Importer cette parcelle ».
 let dernierePopup = null;
-vi.mock("maplibre-gl", () => {
+vi.mock("../services/maplibre", () => {
   class Popup {
     setLngLat() { return this; }
     setHTML() { return this; }

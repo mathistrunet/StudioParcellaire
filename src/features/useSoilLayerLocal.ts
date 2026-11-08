@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { GeoJsonProperties } from "geojson";
-import type maplibregl from "maplibre-gl";
+import type * as maplibregl from "maplibre-gl";
 
 import type { LngLatBBox } from "../types/geo";
 import { loadDepartmentGeoJSON } from "../services/soilmapLocal";
