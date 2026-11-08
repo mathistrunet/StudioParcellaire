@@ -14,7 +14,7 @@ if (typeof window !== "undefined") window.mapboxgl = maplibregl;
 const SOIL_LAYER_ID = "soil-wmts";
 const SOIL_TILES =
   "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile" +
-  "&LAYER=INRA.CARTE.SOLS&STYLE=normal&FORMAT=image/png" +
+  "&LAYER=INRA.CARTE.SOLS&STYLE=CARTE%20DES%20SOLS&FORMAT=image/png" +
   "&TILEMATRIXSET=PM&TILEMATRIX={z}&TILECOL={x}&TILEROW={y}";
 const SOIL_WMS =
   "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap" +
