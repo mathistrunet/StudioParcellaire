@@ -5,8 +5,9 @@ parcellaire existant, on corrige les contours sur une carte, on complète les
 informations (nom, surface, conduite AB, cultures N à N-6, type de sol), puis on
 exporte vers Assolia (CSV), Télépac (XML) ou un SIG (shapefile).
 
-Tout se passe sur le poste : aucune donnée de parcellaire n'est envoyée sur
-Internet, seules les tuiles des fonds de carte sont téléchargées.
+Le parcellaire reste enregistré sur le poste. Seuls des services en ligne sont
+interrogés à la demande : fonds de carte, RPG, toponymie IGN et SoilGrids (qui
+reçoit les coordonnées des parcelles lors du remplissage du type de sol).
 
 ## Démarrage rapide (Windows)
 
@@ -72,9 +73,13 @@ différents.
 
 ### Périmètre de cette version
 
-La déduction automatique du type de sol (SoilGrids / cartes pédologiques) n'est
-pas activée : le type de sol se saisit manuellement. La carte des sols France
-reste disponible comme simple repère visuel dans l'onglet Calques.
+Le type de sol se saisit manuellement ou se déduit automatiquement :
+
+- **Remplir la colonne / Remplir WRB** (tableau) : interroge SoilGrids pour chaque
+  parcelle ; une pastille indique la confiance et ℹ️ ouvre le détail.
+- **Sols présentés** (onglet) : associe les sols détectés sur la carte des sols
+  France aux types de sol d'une structure. La carte doit être affichée.
+- **Grille SoilGrids** (onglet Calques) : affiche les pixels sur l'emprise visible.
 
 L'application démarre sans parcellaire enregistré. Le travail en cours est
 sauvegardé automatiquement sur le poste et rechargé à l'ouverture suivante ; le

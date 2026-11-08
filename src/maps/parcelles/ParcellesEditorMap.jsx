@@ -1,6 +1,7 @@
 // src/maps/parcelles/ParcellesEditorMap.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
+import centroid from "@turf/centroid";
 
 import AppTopBar from "../../components/AppTopBar";
 import RasterToggles from "../../components/RasterToggles";
@@ -23,6 +24,7 @@ import ImportParcellaireButton from "../../Front/ImportParcellaireButton";
 import ExportMenuButton from "../../Front/ExportMenuButton";
 import ParcelleMatchView from "../../components/ParcelleMatchView";
 import LayerUpdateNotice from "../../components/LayerUpdateNotice";
+import SoilTypeMappingPanel from "../../components/SoilTypeMappingPanel";
 import { IMPORT_FORMATS } from "../../services/parcellaireImport";
 
 // ✅ NOUVEAU : hook d’affichage RRP local (depuis un fichier MBTiles placé dans /public/data)
@@ -37,6 +39,15 @@ import {
   getFeatureId,
 } from "../../domain/parcelles/fusion";
 import { getFeatureKey } from "../../utils/parcelleMatching";
+import { featureAreaM2 } from "../../utils/geometry";
+import {
+  loadSoilTypeLookupBySourceFile,
+  loadSoilTypeLookupByUcsId,
+  resolveFileUcs,
+  resolveUcsId,
+  buildSoilCombinationKey,
+} from "../../services/soilTypeMapping";
+import { fetchSoilGridsVisibleGrid } from "../../services/soilgridsGridBackend";
 import { featureCollectionsEqual } from "../../utils/featureCollectionEquality";
 import {
   clearParcellesGeojson,
@@ -102,11 +113,46 @@ const ensureFeaturesHaveYear = (inputFeatures) => {
   return { changed, nextFeatures };
 };
 const DRAW_LAYER_VARIANTS = ["", ".cold", ".hot"];
+const SOILGRIDS_GRID_SOURCE_ID = "soilgrids-grid-source";
+const SOILGRIDS_GRID_LAYER_ID = "soilgrids-grid-layer";
+const EMPTY_COLLECTION = { type: "FeatureCollection", features: [] };
 
 // Panneau latéral redimensionnable : bornes et mémorisation de la largeur.
 const SIDE_WIDTH_KEY = "studioparcellaire.largeur-panneau";
 const SIDE_MIN = 360;
 const SIDE_MAX_RATIO = 0.8;
+
+function buildSoilProbePoints(feature) {
+  const probes = [];
+  const register = (coordinates) => {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) return;
+    const [lng, lat] = coordinates;
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+    const key = `${lng.toFixed(7)}:${lat.toFixed(7)}`;
+    if (!probes.some((probe) => probe.key === key)) {
+      probes.push({ key, coordinates: [lng, lat] });
+    }
+  };
+
+  register(centroid(feature).geometry?.coordinates);
+  const polygonCoordinates =
+    feature?.geometry?.type === "Polygon"
+      ? [feature.geometry.coordinates]
+      : feature?.geometry?.type === "MultiPolygon"
+        ? feature.geometry.coordinates
+        : [];
+
+  polygonCoordinates.forEach((polygon) => {
+    const firstRing = polygon?.[0] || [];
+    if (!firstRing.length) return;
+    const sampleIndexes = [0, Math.floor(firstRing.length / 3), Math.floor((firstRing.length * 2) / 3)];
+    sampleIndexes.forEach((index) => {
+      register(firstRing[index]);
+    });
+  });
+
+  return probes;
+}
 
 function projectLngLatTo3857(lng, lat) {
   const rad = Math.PI / 180;
@@ -192,6 +238,7 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
     setFeatures,
     selectedId,
     selectFeatureOnMap,
+    selectFeaturesOnMap,
     setDrawFeatures,
     mapInitError,
   } = useMapInitialization();
@@ -216,7 +263,17 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
     return Number.isFinite(enregistre) && enregistre >= SIDE_MIN ? enregistre : 460;
   });
   const resizingRef = useRef(false);
-  const [activeTab, setActiveTab] = useState("parcelles"); // "parcelles" | "calques"
+  const [activeTab, setActiveTab] = useState("parcelles"); // "parcelles" | "calques" | "mapping-sols"
+  const [soilMappingParcelCandidates, setSoilMappingParcelCandidates] = useState([]);
+  const [soilMappingRefreshTick, setSoilMappingRefreshTick] = useState(0);
+  const [soilMappingLoading, setSoilMappingLoading] = useState(false);
+  const soilMappingDebugLoggedRef = useRef(false);
+  const [soilGridsGridVisible, setSoilGridsGridVisible] = useState(false);
+  const [soilGridsGridMeta, setSoilGridsGridMeta] = useState(null);
+  const [soilGridsGridError, setSoilGridsGridError] = useState(null);
+  const soilGridsGridAbortRef = useRef(null);
+  const soilGridsGridRequestRef = useRef(0);
+  const soilGridsGridPopupRef = useRef(null);
   // Le message d'accueil n'est qu'une aide au démarrage : on peut le fermer et
   // travailler sur la carte sans avoir chargé de parcellaire.
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
@@ -655,9 +712,230 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
     [],
   );
 
+  const ensureSoilGridsGridLayer = useCallback(() => {
+    if (!mapInstance || !mapInstance.isStyleLoaded()) return false;
+
+    if (!mapInstance.getSource(SOILGRIDS_GRID_SOURCE_ID)) {
+      mapInstance.addSource(SOILGRIDS_GRID_SOURCE_ID, {
+        type: "geojson",
+        data: EMPTY_COLLECTION,
+      });
+    }
+
+    if (!mapInstance.getLayer(SOILGRIDS_GRID_LAYER_ID)) {
+      mapInstance.addLayer({
+        id: SOILGRIDS_GRID_LAYER_ID,
+        type: "line",
+        source: SOILGRIDS_GRID_SOURCE_ID,
+        paint: {
+          "line-color": "#ef4444",
+          "line-opacity": 0.6,
+          "line-width": 1,
+        },
+        layout: {
+          visibility: soilGridsGridVisible ? "visible" : "none",
+        },
+      });
+    }
+
+    return true;
+  }, [mapInstance, soilGridsGridVisible]);
+
+  const refreshSoilGridsGrid = useCallback(() => {
+    if (!mapInstance || !soilGridsGridVisible) return;
+    if (!ensureSoilGridsGridLayer()) return;
+
+    const bounds = mapInstance.getBounds?.();
+    if (!bounds) return;
+
+    const bbox = [
+      bounds.getWest(),
+      bounds.getSouth(),
+      bounds.getEast(),
+      bounds.getNorth(),
+    ];
+
+    if (soilGridsGridAbortRef.current) {
+      soilGridsGridAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    soilGridsGridAbortRef.current = controller;
+
+    const requestId = soilGridsGridRequestRef.current + 1;
+    soilGridsGridRequestRef.current = requestId;
+    setSoilGridsGridError(null);
+
+    fetchSoilGridsVisibleGrid({ bbox, limit: 6000, signal: controller.signal })
+      .then((payload) => {
+        if (requestId !== soilGridsGridRequestRef.current) return;
+        const source = mapInstance.getSource(SOILGRIDS_GRID_SOURCE_ID);
+        if (source?.setData) {
+          source.setData(payload?.collection || EMPTY_COLLECTION);
+        }
+        setSoilGridsGridMeta({
+          featureCount: payload?.featureCount ?? 0,
+          truncated: !!payload?.truncated,
+          coverageId: payload?.metadata?.coverageId || null,
+          crs: payload?.metadata?.crs || "EPSG:4326",
+        });
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        if (requestId !== soilGridsGridRequestRef.current) return;
+        const source = mapInstance.getSource(SOILGRIDS_GRID_SOURCE_ID);
+        if (source?.setData) {
+          source.setData(EMPTY_COLLECTION);
+        }
+        setSoilGridsGridMeta(null);
+        setSoilGridsGridError(error?.message || "Erreur de chargement de la grille SoilGrids");
+      });
+  }, [mapInstance, soilGridsGridVisible, ensureSoilGridsGridLayer]);
+
+  useEffect(() => {
+    if (!mapInstance) return;
+
+    if (!mapInstance.isStyleLoaded()) {
+      const onLoad = () => {
+        ensureSoilGridsGridLayer();
+      };
+      mapInstance.once("load", onLoad);
+      return () => mapInstance.off("load", onLoad);
+    }
+
+    ensureSoilGridsGridLayer();
+  }, [mapInstance, ensureSoilGridsGridLayer]);
+
+  useEffect(() => {
+    if (!mapInstance || !mapInstance.getLayer(SOILGRIDS_GRID_LAYER_ID)) return;
+
+    mapInstance.setLayoutProperty(
+      SOILGRIDS_GRID_LAYER_ID,
+      "visibility",
+      soilGridsGridVisible ? "visible" : "none",
+    );
+
+    if (!soilGridsGridVisible) {
+      if (soilGridsGridAbortRef.current) {
+        soilGridsGridAbortRef.current.abort();
+      }
+      const source = mapInstance.getSource(SOILGRIDS_GRID_SOURCE_ID);
+      if (source?.setData) source.setData(EMPTY_COLLECTION);
+      setSoilGridsGridMeta(null);
+      setSoilGridsGridError(null);
+      if (soilGridsGridPopupRef.current) {
+        soilGridsGridPopupRef.current.remove();
+        soilGridsGridPopupRef.current = null;
+      }
+      return;
+    }
+
+    refreshSoilGridsGrid();
+  }, [mapInstance, soilGridsGridVisible, refreshSoilGridsGrid]);
+
+  useEffect(() => {
+    if (!mapInstance || !soilGridsGridVisible) return;
+    let timer = null;
+
+    const handleMoveEnd = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        refreshSoilGridsGrid();
+      }, 120);
+    };
+
+    mapInstance.on("moveend", handleMoveEnd);
+    return () => {
+      mapInstance.off("moveend", handleMoveEnd);
+      clearTimeout(timer);
+    };
+  }, [mapInstance, soilGridsGridVisible, refreshSoilGridsGrid]);
+
+  useEffect(() => {
+    if (!mapInstance) return;
+
+    const parseBboxValue = (value) => {
+      if (Array.isArray(value) && value.length === 4) return value.map((item) => Number(item));
+      if (typeof value !== "string") return null;
+      const values = value.split(",").map((item) => Number(item.trim()));
+      if (values.length !== 4 || values.some((item) => !Number.isFinite(item))) return null;
+      return values;
+    };
+
+    const handleGridClick = (event) => {
+      const feature = event?.features?.[0];
+      if (!feature) return;
+      const props = feature.properties || {};
+      const centerLon = Number(props?.centerLon);
+      const centerLat = Number(props?.centerLat);
+      const center = Number.isFinite(centerLon) && Number.isFinite(centerLat) ? [centerLon, centerLat] : null;
+      const bbox = parseBboxValue(props?.bboxWgs84);
+
+      const html = [
+        `<strong>${props.pixelId || "Pixel SoilGrids"}</strong>`,
+        `Ligne / colonne : ${props.row ?? "?"} / ${props.col ?? "?"}`,
+        center ? `Centre : ${Number(center[1]).toFixed(6)}, ${Number(center[0]).toFixed(6)}` : null,
+        Array.isArray(bbox)
+          ? `BBox : ${bbox.map((v) => Number(v).toFixed(6)).join(", ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("<br />");
+
+      if (soilGridsGridPopupRef.current) {
+        soilGridsGridPopupRef.current.remove();
+      }
+      soilGridsGridPopupRef.current = new maplibregl.Popup({ closeButton: true })
+        .setLngLat(event.lngLat)
+        .setHTML(`<div style="font-size:12px;">${html}</div>`)
+        .addTo(mapInstance);
+    };
+
+    const handleMouseEnter = () => {
+      mapInstance.getCanvas().style.cursor = "pointer";
+    };
+    const handleMouseLeave = () => {
+      mapInstance.getCanvas().style.cursor = "";
+    };
+
+    const bindLayerEvents = () => {
+      if (!mapInstance.getLayer(SOILGRIDS_GRID_LAYER_ID)) return false;
+      mapInstance.on("click", SOILGRIDS_GRID_LAYER_ID, handleGridClick);
+      mapInstance.on("mouseenter", SOILGRIDS_GRID_LAYER_ID, handleMouseEnter);
+      mapInstance.on("mouseleave", SOILGRIDS_GRID_LAYER_ID, handleMouseLeave);
+      return true;
+    };
+
+    let bound = bindLayerEvents();
+    const handleStyleData = () => {
+      if (!bound) {
+        bound = bindLayerEvents();
+      }
+    };
+    if (!bound) {
+      mapInstance.on("styledata", handleStyleData);
+    }
+
+    return () => {
+      if (bound) {
+        mapInstance.off("click", SOILGRIDS_GRID_LAYER_ID, handleGridClick);
+        mapInstance.off("mouseenter", SOILGRIDS_GRID_LAYER_ID, handleMouseEnter);
+        mapInstance.off("mouseleave", SOILGRIDS_GRID_LAYER_ID, handleMouseLeave);
+      }
+      mapInstance.off("styledata", handleStyleData);
+      if (soilGridsGridPopupRef.current) {
+        soilGridsGridPopupRef.current.remove();
+        soilGridsGridPopupRef.current = null;
+      }
+    };
+  }, [mapInstance]);
+
   useEffect(() => () => {
     infoAbortControllers.current.forEach((controller) => controller.abort());
     infoAbortControllers.current = [];
+    if (soilGridsGridAbortRef.current) {
+      soilGridsGridAbortRef.current.abort();
+      soilGridsGridAbortRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -1037,6 +1315,131 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
 
     return true;
   };
+
+  const resolveParcelsWithSoilRows = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map || !rrpVisible || !map.getLayer("soils-rrp-fill")) {
+      throw new Error("Active la couche Carte des sols France avant de visualiser les sols.");
+    }
+    if (loadingTiles || !polygonsShown) {
+      throw new Error("Données sols en cours de chargement.");
+    }
+
+    const [lookupBySourceFile, lookupByUcsId] = await Promise.all([
+      loadSoilTypeLookupBySourceFile(),
+      loadSoilTypeLookupByUcsId(),
+    ]);
+
+    return features.map((feature, index) => {
+      const areaM2 = featureAreaM2(feature) ?? 0;
+      const surfaceHa = areaM2 / 10000;
+      const probePoints = buildSoilProbePoints(feature);
+      if (!probePoints.length) {
+        return { index, feature, soilRow: null, surfaceHa };
+      }
+
+      let detectedSoilRow = null;
+      for (const probe of probePoints) {
+        const point = map.project([probe.coordinates[0], probe.coordinates[1]]);
+        const rendered = map.queryRenderedFeatures(point, { layers: ["soils-rrp-fill"] }) || [];
+        if (!soilMappingDebugLoggedRef.current && rendered.length) {
+          const sample = rendered[0];
+          const sampleProps = sample?.properties || {};
+          const sampleFileUcs = resolveFileUcs(sampleProps);
+          const sampleUcsId = resolveUcsId(sampleProps);
+          console.info("[SOIL_DEBUG] sample RRP feature properties", {
+            id: sample.id,
+            keys: Object.keys(sampleProps),
+            fileUcs: sampleFileUcs,
+            ucsId: sampleUcsId,
+            sampleProps,
+          });
+          soilMappingDebugLoggedRef.current = true;
+        }
+        for (const candidate of rendered) {
+          const soilProps = candidate?.properties || {};
+          const fileUcs = resolveFileUcs(soilProps);
+          const ucsId = resolveUcsId(soilProps);
+          const row =
+            (fileUcs && lookupBySourceFile.get(fileUcs.toLowerCase())) ||
+            (ucsId && lookupByUcsId.get(ucsId)) ||
+            null;
+          if (row) {
+            detectedSoilRow = row;
+            break;
+          }
+        }
+        if (detectedSoilRow) break;
+      }
+
+      return { index, feature, soilRow: detectedSoilRow, surfaceHa };
+    });
+  }, [features, mapRef, rrpVisible, loadingTiles, polygonsShown]);
+
+  useEffect(() => {
+    if (!rrpVisible) {
+      setSoilMappingParcelCandidates([]);
+      return undefined;
+    }
+    if (loadingTiles || !polygonsShown) {
+      return undefined;
+    }
+    let cancelled = false;
+    // Debounce 300ms : évite N×probes queryRenderedFeatures à chaque frappe/édition
+    const timeoutId = setTimeout(() => {
+      setSoilMappingLoading(true);
+      resolveParcelsWithSoilRows()
+        .then((candidates) => {
+          if (!cancelled) setSoilMappingParcelCandidates(candidates);
+        })
+        .catch(() => {
+          if (!cancelled) setSoilMappingParcelCandidates([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSoilMappingLoading(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [resolveParcelsWithSoilRows, rrpVisible, loadingTiles, polygonsShown, soilMappingRefreshTick]);
+
+  const refreshSoilMapping = useCallback(() => {
+    soilMappingDebugLoggedRef.current = false;
+    setSoilMappingRefreshTick((prev) => prev + 1);
+  }, []);
+
+  const applySoilMappingToParcels = useCallback((structureName, mapping) => {
+    if (!structureName || !mapping) return;
+    const combinationMap = mapping?.combinationMap || {};
+    const hasMapping = Object.keys(combinationMap).length > 0;
+    if (!hasMapping) {
+      alert("Aucun mapping defini pour cette structure.");
+      return;
+    }
+
+    const candidatesByIndex = new Map();
+    soilMappingParcelCandidates.forEach((candidate) => {
+      if (candidate && Number.isFinite(candidate.index)) {
+        candidatesByIndex.set(candidate.index, candidate);
+      }
+    });
+
+    const nextFeatures = features.map((feature, index) => {
+      const candidate = candidatesByIndex.get(index);
+      if (!candidate?.soilRow) return feature;
+      const key = buildSoilCombinationKey(candidate.soilRow);
+      const mappedName = combinationMap[key];
+      if (!mappedName) return feature;
+      const props = { ...(feature.properties || {}) };
+      props.type_sol = mappedName;
+      props.TYPE_SOL = mappedName;
+      return { ...feature, properties: props };
+    });
+
+    setFeatures(nextFeatures);
+  }, [features, soilMappingParcelCandidates, setFeatures]);
 
   // ---- Barre d'outils basse : elle occupe sa propre ligne sous la carte plutôt
   //      que de flotter au-dessus, ce qui évite de masquer les parcelles du bas.
@@ -1489,6 +1892,15 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
                     />
                   ) : null}
                 </button>
+                <button
+                  type="button"
+                  role="tab"
+                  className="fp-tab"
+                  aria-selected={activeTab === "mapping-sols"}
+                  onClick={() => setActiveTab("mapping-sols")}
+                >
+                  Sols présentés
+                </button>
               </div>
 
               {activeTab === "parcelles" && features.length === 0 ? (
@@ -1570,6 +1982,18 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
                 </>
               )}
 
+              {activeTab === "mapping-sols" && (
+                <SoilTypeMappingPanel
+                  parcelCandidates={soilMappingParcelCandidates}
+                  parcelCount={features.length}
+                  rrpVisible={rrpVisible}
+                  loading={soilMappingLoading || loadingTiles}
+                  onRefresh={refreshSoilMapping}
+                  onApplyMapping={applySoilMappingToParcels}
+                  onSelectParcels={(ids) => selectFeaturesOnMap(ids, true)}
+                />
+              )}
+
               {activeTab === "calques" && (
                 <div style={{ display: "grid", gap: 14 }}>
                   <LayerUpdateNotice
@@ -1611,12 +2035,39 @@ export default function ParcellesEditorMap({ mapMode, onMapModeChange, onOpenGui
                   </div>
 
                   <div className="fp-card fp-card--muted">
+                    <h3 className="fp-section-title">Grille SoilGrids</h3>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={soilGridsGridVisible}
+                        onChange={(event) => setSoilGridsGridVisible(event.target.checked)}
+                      />
+                      <span>Afficher la grille</span>
+                    </label>
+                    <p className="fp-hint" style={{ margin: "6px 0 0" }}>
+                      Découpage réel des pixels SoilGrids (WCS) sur l&apos;emprise visible.
+                    </p>
+                    {soilGridsGridMeta ? (
+                      <p className="fp-hint" style={{ margin: "6px 0 0" }}>
+                        {soilGridsGridMeta.featureCount} pixel{soilGridsGridMeta.featureCount > 1 ? "s" : ""} affiché
+                        {soilGridsGridMeta.featureCount > 1 ? "s" : ""}
+                        {soilGridsGridMeta.truncated ? " (limite atteinte)" : ""}
+                        {soilGridsGridMeta.coverageId ? ` - ${soilGridsGridMeta.coverageId}` : ""}
+                        {soilGridsGridMeta.crs ? ` (${soilGridsGridMeta.crs})` : ""}
+                      </p>
+                    ) : null}
+                    {soilGridsGridError ? (
+                      <p style={{ margin: "6px 0 0", fontSize: 11, color: "#b91c1c" }}>{soilGridsGridError}</p>
+                    ) : null}
+                  </div>
+
+                  <div className="fp-card fp-card--muted">
                     <h3 className="fp-section-title">Carte des sols France</h3>
                     <p className="fp-hint" style={{ margin: "8px 0" }}>
                       Couche pédologique locale (RRP). Elle nécessite les fichiers
-                      départementaux dans <code>public/data/soilmap_dep</code> et sert
-                      uniquement de repère visuel : le type de sol des parcelles reste saisi
-                      manuellement dans cette version.
+                      départementaux, téléchargés à la demande dans{" "}
+                      <code>public/data/soilmap_dep</code>. L&apos;onglet « Sols présentés » s&apos;appuie
+                      sur cette couche : elle doit être affichée pour détecter les sols des parcelles.
                     </p>
 
                     <label style={{ display: "flex", alignItems: "center", gap: 8 }}>

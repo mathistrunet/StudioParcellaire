@@ -10,6 +10,9 @@ import {
 } from "../utils/cultureLabels";
 import { featureAreaM2 } from "../utils/geometry";
 import { fetchRpgGeoJSON, getCultureLabel, getMapBoundsCRS84 } from "../services/rpg";
+import { fetchParcelSoilGrids, fetchParcelWrb } from "../services/soilgridsBackend";
+import { saveParcellesGeojson } from "../services/parcellesBackend";
+import ParcelSoilPanel from "./ParcelSoilPanel";
 import { RPG_MIN_ZOOM } from "../Front/useRpgLayer";
 import {
   CULTURE_COLUMNS,
@@ -279,6 +282,30 @@ const FIXED_COLUMNS = [
   { id: "irrigable", label: "Irrigable", width: 85 },
 ];
 
+// Indice de confiance (probabilité de la classe WRB, en %) renvoyé par SoilGrids.
+// Format ISRIC : [["Cambisols", 30]] -> 30. Renvoie null si indisponible.
+function extractSoilConfidence(probability) {
+  if (Array.isArray(probability) && probability.length && Array.isArray(probability[0])) {
+    const pct = Number(probability[0][1]);
+    return Number.isFinite(pct) ? pct : null;
+  }
+  if (typeof probability === "number" && Number.isFinite(probability)) return probability;
+  return null;
+}
+
+// Petit badge en lecture seule affiché à côté du type de sol issu de SoilGrids.
+const confidenceBadgeStyle = {
+  flex: "0 0 auto",
+  border: "1px solid #d1d5db",
+  background: "#f3f4f6",
+  color: "#374151",
+  borderRadius: 6,
+  fontSize: 11,
+  lineHeight: 1,
+  padding: "2px 5px",
+  whiteSpace: "nowrap",
+};
+
 const SOIL_COLUMN = { id: "type_sol", label: "Type de sol", width: 160 };
 
 /** Toutes les colonnes proposées au filtre, dans l'ordre d'affichage. */
@@ -323,6 +350,8 @@ const TableRow = React.memo(function TableRow({
   typedPrev4,
   typedPrev5,
   typedPrev6,
+  soilUpr,
+  onOpenSoilDetail,
   onSelect,
   onUpdateField,
   onUpdateCulture,
@@ -425,15 +454,52 @@ const TableRow = React.memo(function TableRow({
       ))}
       {affiche("type_sol") && (
         <td style={cellStyle}>
-          <input
-            value={props.type_sol ?? props.TYPE_SOL ?? ""}
-            onChange={(e) => {
-              const val = e.target.value;
-              onUpdateField(idKey, (p) => ({ ...p, type_sol: val, TYPE_SOL: val }));
-            }}
-            onClick={(e) => e.stopPropagation()}
-            style={inputStyle}
-          />
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <input
+              value={props.type_sol ?? props.TYPE_SOL ?? ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                // Une saisie manuelle invalide l'indice de confiance SoilGrids.
+                onUpdateField(idKey, (p) => {
+                  const next = { ...p, type_sol: val, TYPE_SOL: val };
+                  delete next.type_sol_confidence;
+                  return next;
+                });
+              }}
+              onClick={(e) => e.stopPropagation()}
+              style={inputStyle}
+            />
+            {props.type_sol_confidence != null ? (
+              <span
+                title="Indice de confiance SoilGrids (probabilité de la classe WRB). Disparaît si le type de sol est modifié."
+                style={confidenceBadgeStyle}
+              >
+                {props.type_sol_confidence}%
+              </span>
+            ) : null}
+            {soilUpr ? (
+              <button
+                type="button"
+                title="Voir les données SoilGrids ayant servi à déduire l'UPR"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenSoilDetail?.(idKey);
+                }}
+                style={{
+                  flex: "0 0 auto",
+                  border: "1px solid #c7d2fe",
+                  background: "#eef2ff",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  fontSize: 12,
+                  lineHeight: 1,
+                  padding: "2px 5px",
+                }}
+              >
+                ℹ️
+              </button>
+            ) : null}
+          </div>
         </td>
       )}
       {ADVANCED_COLUMNS.filter((col) => affiche(col.id)).map((col) => (
@@ -483,6 +549,16 @@ export default function ParcelleEditor({
   const rowsRef = useRef(new Map());
   const [typed, setTyped] = useState(buildEmptyTypedState);
   const [isFillingRpg, setIsFillingRpg] = useState(false);
+  // Remplissage UPR depuis SoilGrids
+  const [isFillingSoil, setIsFillingSoil] = useState(false);
+  const [soilFillProgress, setSoilFillProgress] = useState(null); // { done, total }
+  // Remplissage WRB-seul (nom de classe par parcelle) — plus léger, pour la Roumanie
+  const [isFillingWrb, setIsFillingWrb] = useState(false);
+  const [wrbFillProgress, setWrbFillProgress] = useState(null); // { done, total }
+  // Données SoilGrids/UPR conservées le temps de la session (idKey -> payload normalisé)
+  const [soilUprByIdKey, setSoilUprByIdKey] = useState({});
+  // Panneau latéral de consultation (idKey ouvert)
+  const [soilDetailIdKey, setSoilDetailIdKey] = useState(null);
   // Colonnes masquées, mémorisées d'une session à l'autre : chacun règle une
   // fois l'affichage qui lui convient.
   const [hiddenColumns, setHiddenColumns] = useState(() => {
@@ -1243,9 +1319,49 @@ export default function ParcelleEditor({
                       ) : null}
 
                       {col.id === "type_sol" ? (
-                        <div style={{ fontWeight: 400, fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-                          Saisie libre
-                        </div>
+                        <>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          fillSoilTypeColumn();
+                        }}
+                        disabled={isFillingSoil}
+                        title="Déduire l'UPR de chaque parcelle depuis SoilGrids (texture, RU, WRB)"
+                        style={{
+                          ...headerButtonStyle,
+                          opacity: isFillingSoil ? 0.6 : 1,
+                          cursor: isFillingSoil ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {isFillingSoil
+                          ? soilFillProgress
+                            ? `Remplissage ${soilFillProgress.done}/${soilFillProgress.total}`
+                            : "Remplissage..."
+                          : "Remplir la colonne"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          fillWrbClassColumn();
+                        }}
+                        disabled={isFillingWrb || isFillingSoil}
+                        title="Remonter uniquement le nom de classe WRB par parcelle (plus léger, dédup par pixel)"
+                        style={{
+                          ...headerButtonStyle,
+                          marginTop: 4,
+                          opacity: isFillingWrb || isFillingSoil ? 0.6 : 1,
+                          cursor: isFillingWrb || isFillingSoil ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {isFillingWrb
+                          ? wrbFillProgress
+                            ? `WRB ${wrbFillProgress.done}/${wrbFillProgress.total}`
+                            : "Remplissage..."
+                          : "Remplir WRB"}
+                      </button>
+                        </>
                       ) : null}
                     </th>
                   );
@@ -1271,6 +1387,8 @@ export default function ParcelleEditor({
                     typedPrev4={typed.prev4?.[idKey] ?? ""}
                     typedPrev5={typed.prev5?.[idKey] ?? ""}
                     typedPrev6={typed.prev6?.[idKey] ?? ""}
+                    soilUpr={soilUprByIdKey[idKey]}
+                    onOpenSoilDetail={setSoilDetailIdKey}
                     onSelect={onSelect}
                     onUpdateField={updateFeatureByIdKey}
                     onUpdateCulture={updateCultureField}
@@ -1285,10 +1403,250 @@ export default function ParcelleEditor({
     );
   };
 
+  const resolveParcelId = (feature) =>
+    String(feature?.id ?? feature?.properties?.id ?? feature?.properties?.parcelleNo ?? "");
+
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Récupère l'UPR d'une parcelle avec relance sur rate-limit serveur. Le 429 est désormais
+  // attendu (requêtes parallèles) : on relance avec un backoff court et jitté pour étaler les
+  // reprises plutôt que de les faire converger en troupeau.
+  const fetchUprWithRetry = async (parcelId, attempt = 0) => {
+    try {
+      return await fetchParcelSoilGrids(parcelId);
+    } catch (error) {
+      if (attempt < 8 && /rate limit/i.test(error?.message || "")) {
+        await delay(1500 + Math.random() * 1500);
+        return fetchUprWithRetry(parcelId, attempt + 1);
+      }
+      throw error;
+    }
+  };
+
+  // Nombre de remontées SoilGrids menées en parallèle. Le serveur mutualise les requêtes d'un
+  // même pixel 250 m et ne compte que les vrais appels ISRIC dans son rate-limit (60/min), donc
+  // une concurrence modérée sature le débit utile sans déclencher de 429 sur les exploitations
+  // groupées (cas courant), tout en restant correcte pour les parcelles dispersées.
+  const SOIL_FILL_CONCURRENCY = 6;
+
+  const fillSoilTypeColumn = async () => {
+    if (!Array.isArray(features) || features.length === 0) {
+      alert("Aucune parcelle à analyser.");
+      return;
+    }
+    setIsFillingSoil(true);
+    setSoilFillProgress({ done: 0, total: features.length });
+    try {
+      // 1) Persister les parcelles côté serveur : l'endpoint SoilGrids les retrouve par id.
+      await saveParcellesGeojson(features);
+
+      let filled = 0;
+      let done = 0;
+      const errors = [];
+
+      // Traitement par un pool de workers concurrents : chacun pioche la parcelle suivante dans
+      // la file tant qu'il en reste. La déduplication par pixel est gérée côté serveur.
+      let nextIndex = 0;
+      const processOne = async (i) => {
+        const feature = features[i];
+        const idKey = String(feature.id ?? i);
+        const parcelId = resolveParcelId(feature);
+        if (parcelId) {
+          try {
+            const payload = await fetchUprWithRetry(parcelId);
+            const code = payload?.upr?.code;
+            const label = payload?.upr?.label;
+            if (code) {
+              const display = label ? `${code} — ${label}` : code;
+              const confidence = extractSoilConfidence(payload?.wrb?.probability);
+              // Remplissage progressif : la cellule et son ℹ️ apparaissent dès le calcul.
+              setSoilUprByIdKey((prev) => ({ ...prev, [idKey]: payload }));
+              setFeatures((prev) =>
+                (prev || []).map((feat, fi) => {
+                  if (String(feat.id ?? fi) !== idKey) return feat;
+                  const nextProps = { ...(feat.properties || {}), type_sol: display, TYPE_SOL: display };
+                  if (confidence != null) nextProps.type_sol_confidence = confidence;
+                  else delete nextProps.type_sol_confidence;
+                  return { ...feat, properties: nextProps };
+                })
+              );
+              filled += 1;
+            } else {
+              errors.push(parcelId);
+            }
+          } catch (error) {
+            console.warn(`[SOIL_FILL] Parcelle ${parcelId} échouée:`, error?.message || error);
+            errors.push(parcelId);
+          }
+        }
+        done += 1;
+        setSoilFillProgress({ done, total: features.length });
+      };
+
+      const worker = async () => {
+        while (nextIndex < features.length) {
+          const i = nextIndex;
+          nextIndex += 1;
+          await processOne(i);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(SOIL_FILL_CONCURRENCY, features.length) }, () => worker())
+      );
+
+      if (errors.length) {
+        alert(`${filled} parcelle(s) remplie(s). ${errors.length} sans donnée SoilGrids exploitable (point hors couverture ou identifiant manquant).`);
+      }
+    } catch (error) {
+      console.error("[SOIL_FILL] Échec global:", error);
+      alert("Erreur lors du remplissage des types de sol. Voir la console pour le détail.");
+    } finally {
+      setIsFillingSoil(false);
+      setSoilFillProgress(null);
+    }
+  };
+
+  const fetchWrbWithRetry = async (parcelId, attempt = 0) => {
+    try {
+      return await fetchParcelWrb(parcelId);
+    } catch (error) {
+      if (attempt < 8 && /rate limit/i.test(error?.message || "")) {
+        await delay(1500 + Math.random() * 1500);
+        return fetchWrbWithRetry(parcelId, attempt + 1);
+      }
+      throw error;
+    }
+  };
+
+  // Remontée WRB-seule : remplit la colonne « Type de sol » avec le nom de classe WRB de chaque
+  // parcelle. Beaucoup plus léger que l'UPR (un seul appel ISRIC par pixel, pas de profil ni de
+  // calcul) ; suffisant pour les rendez-vous en Roumanie. La classification est best-effort côté
+  // serveur (ne renvoie jamais d'erreur d'indisponibilité), donc pas de 504/500 en rafale ici.
+  const fillWrbClassColumn = async () => {
+    if (!Array.isArray(features) || features.length === 0) {
+      alert("Aucune parcelle à analyser.");
+      return;
+    }
+    setIsFillingWrb(true);
+    setWrbFillProgress({ done: 0, total: features.length });
+    try {
+      await saveParcellesGeojson(features);
+
+      let filled = 0;
+      let done = 0;
+      const noData = []; // réponse OK mais aucune classe WRB (hors couverture / domaine)
+      const failed = []; // échec réseau réel
+      let consecutiveFailures = 0;
+      let aborted = false;
+      const FAILURE_ABORT_THRESHOLD = 10;
+
+      let nextIndex = 0;
+      const processOne = async (i) => {
+        const feature = features[i];
+        const idKey = String(feature.id ?? i);
+        const parcelId = resolveParcelId(feature);
+        if (parcelId) {
+          try {
+            const payload = await fetchWrbWithRetry(parcelId);
+            consecutiveFailures = 0;
+            const wrb = payload?.wrbClassName;
+            if (wrb) {
+              const confidence = extractSoilConfidence(payload?.probability);
+              setFeatures((prev) =>
+                (prev || []).map((feat, fi) => {
+                  if (String(feat.id ?? fi) !== idKey) return feat;
+                  const nextProps = {
+                    ...(feat.properties || {}),
+                    type_sol: wrb,
+                    TYPE_SOL: wrb,
+                    wrb_class: wrb,
+                    WRB_CLASS: wrb,
+                  };
+                  if (confidence != null) nextProps.type_sol_confidence = confidence;
+                  else delete nextProps.type_sol_confidence;
+                  return { ...feat, properties: nextProps };
+                })
+              );
+              filled += 1;
+            } else {
+              noData.push(parcelId);
+            }
+          } catch (error) {
+            console.warn(`[WRB_FILL] Parcelle ${parcelId} échouée:`, error?.message || error);
+            failed.push(parcelId);
+            consecutiveFailures += 1;
+            if (consecutiveFailures >= FAILURE_ABORT_THRESHOLD) aborted = true;
+          }
+        }
+        done += 1;
+        setWrbFillProgress({ done, total: features.length });
+      };
+
+      const worker = async () => {
+        while (nextIndex < features.length && !aborted) {
+          const i = nextIndex;
+          nextIndex += 1;
+          await processOne(i);
+        }
+      };
+      // Concurrence modérée : la classification ISRIC est lente (~8 s) ; on évite de la saturer.
+      const WRB_FILL_CONCURRENCY = 4;
+      await Promise.all(
+        Array.from({ length: Math.min(WRB_FILL_CONCURRENCY, features.length) }, () => worker())
+      );
+
+      if (aborted) {
+        const remaining = features.length - done;
+        alert(
+          `Remontée WRB interrompue : SoilGrids ne répond pas (${failed.length} échecs consécutifs). ` +
+            `${filled} parcelle(s) remplie(s), ${remaining} non traitée(s). Réessaie plus tard.`
+        );
+      } else if (noData.length || failed.length) {
+        const parts = [];
+        if (noData.length) parts.push(`${noData.length} sans classe WRB (hors couverture)`);
+        if (failed.length) parts.push(`${failed.length} en échec`);
+        alert(`${filled} parcelle(s) remplie(s). ${parts.join(", ")}.`);
+      }
+    } catch (error) {
+      console.error("[WRB_FILL] Échec global:", error);
+      alert("Erreur lors de la remontée WRB. Voir la console pour le détail.");
+    } finally {
+      setIsFillingWrb(false);
+      setWrbFillProgress(null);
+    }
+  };
+
+  const soilDetailFeature = useMemo(() => {
+    if (soilDetailIdKey == null) return null;
+    const list = features || [];
+    for (let i = 0; i < list.length; i += 1) {
+      if (String(list[i].id ?? i) === String(soilDetailIdKey)) return list[i];
+    }
+    return null;
+  }, [soilDetailIdKey, features]);
+  const soilDetailPayload = soilDetailIdKey != null ? soilUprByIdKey[soilDetailIdKey] : null;
+
   return (
     <div style={{ marginTop: 12 }}>
       {renderTableView()}
       {renderMoveCulturesDialog()}
+      {soilDetailFeature && soilDetailPayload ? (
+        <ParcelSoilPanel
+          parcel={soilDetailFeature}
+          soilState={{ data: soilDetailPayload, loading: false, error: null, cacheHit: false }}
+          onClose={() => setSoilDetailIdKey(null)}
+          onRefresh={async () => {
+            const parcelId = resolveParcelId(soilDetailFeature);
+            if (!parcelId) return;
+            try {
+              const payload = await fetchParcelSoilGrids(parcelId, { refresh: true });
+              setSoilUprByIdKey((prev) => ({ ...prev, [soilDetailIdKey]: payload }));
+            } catch (error) {
+              console.warn("[SOIL_DETAIL] Rafraîchissement échoué:", error?.message || error);
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }

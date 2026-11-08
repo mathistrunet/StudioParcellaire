@@ -295,10 +295,14 @@ export function useSoilLayerLocal({
         window.clearTimeout(updateTimerRef.current);
         updateTimerRef.current = null;
       }
-      if (map.getLayer(labelLayerId)) map.removeLayer(labelLayerId);
-      if (map.getLayer(lineLayerId)) map.removeLayer(lineLayerId);
-      if (map.getLayer(fillLayerId)) map.removeLayer(fillLayerId);
-      if (map.getSource(sourceId)) map.removeSource(sourceId);
+      // Au départ du mode Édition, la carte est déjà détruite (map.style absent) :
+      // l'interroger ferait planter toute l'application.
+      if (map.style) {
+        if (map.getLayer(labelLayerId)) map.removeLayer(labelLayerId);
+        if (map.getLayer(lineLayerId)) map.removeLayer(lineLayerId);
+        if (map.getLayer(fillLayerId)) map.removeLayer(fillLayerId);
+        if (map.getSource(sourceId)) map.removeSource(sourceId);
+      }
       currentTileRef.current = null;
       setCurrentTileSummary(null);
       updateRef.current = null;
@@ -505,6 +509,7 @@ function useGeoportalOverlays({
       if (!map) return;
       const overlayState = overlayStateRef.current;
       overlayState.forEach((_, key) => {
+        if (!map.style) return; // carte déjà détruite : ses couches ont disparu avec elle
         const { sourceId: overlaySourceId, layerId } = getOverlayIdentifiers(sourceId, key);
         if (map.getLayer(layerId)) {
           map.removeLayer(layerId);

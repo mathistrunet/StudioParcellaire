@@ -17,6 +17,8 @@ import {
 } from "./parcellesLayers";
 import { applyFilters, matchesFilters } from "./parcellesFilters";
 import { featuresBounds } from "../../utils/geometry";
+import { fetchParcelSoilGrids } from "../../services/soilgridsBackend";
+import ParcelSoilPanel from "../../components/ParcelSoilPanel";
 
 const DEFAULT_CENTER = [2.2137, 46.2276];
 const DEFAULT_ZOOM = 5;
@@ -34,6 +36,8 @@ export default function ParcellesViewerMap({
   const popupRef = useRef(null);
   const hoveredIdRef = useRef(null);
   const [collection, setCollection] = useState(null);
+  const [selectedParcel, setSelectedParcel] = useState(null);
+  const [soilState, setSoilState] = useState({ loading: false, data: null, error: null, cacheHit: false });
   const ensureRaster = useRasterLayers();
   const latestFiltersRef = useRef(filters);
   const latestPaletteRef = useRef(palette);
@@ -228,6 +232,17 @@ export default function ParcellesViewerMap({
         .setHTML(`<div style="font-size:12px;">${content}</div>`)
         .addTo(map);
 
+      const parcelId = String(feature.id ?? feature.properties?.id ?? feature.properties?.parcelleNo ?? "");
+      if (!parcelId) return;
+      setSelectedParcel({ id: parcelId, feature });
+      setSoilState({ loading: true, data: null, error: null, cacheHit: false });
+      fetchParcelSoilGrids(parcelId)
+        .then((dataPayload) => {
+          setSoilState({ loading: false, data: dataPayload, error: null, cacheHit: !!dataPayload.cacheHit });
+        })
+        .catch((error) => {
+          setSoilState({ loading: false, data: null, error: error?.message || "Erreur", cacheHit: false });
+        });
     };
 
     map.on("mousemove", PARCELLES_VIEWER_FILL_ID, handleMove);
@@ -344,7 +359,7 @@ export default function ParcellesViewerMap({
         id="parcelles-viewer-map"
         style={{ position: "absolute", inset: 0 }}
       />
-      {hasFeatures ? (
+      {hasFeatures && !selectedParcel ? (
         <button
           type="button"
           className="fp-btn"
@@ -383,6 +398,33 @@ export default function ParcellesViewerMap({
           Aucune parcelle chargée. Passez en mode Édition pour importer un parcellaire.
         </div>
       ) : null}
+      <ParcelSoilPanel
+        parcel={selectedParcel}
+        soilState={soilState}
+        onClose={() => setSelectedParcel(null)}
+        onImport={() => {
+          if (!selectedParcel?.id) return;
+          setSoilState((prev) => ({ ...prev, loading: true, error: null }));
+          fetchParcelSoilGrids(selectedParcel.id)
+            .then((dataPayload) => {
+              setSoilState({ loading: false, data: dataPayload, error: null, cacheHit: !!dataPayload.cacheHit });
+            })
+            .catch((error) => {
+              setSoilState({ loading: false, data: null, error: error?.message || "Erreur", cacheHit: false });
+            });
+        }}
+        onRefresh={() => {
+          if (!selectedParcel?.id) return;
+          setSoilState((prev) => ({ ...prev, loading: true, error: null }));
+          fetchParcelSoilGrids(selectedParcel.id, { refresh: true })
+            .then((dataPayload) => {
+              setSoilState({ loading: false, data: dataPayload, error: null, cacheHit: !!dataPayload.cacheHit });
+            })
+            .catch((error) => {
+              setSoilState({ loading: false, data: null, error: error?.message || "Erreur", cacheHit: false });
+            });
+        }}
+      />
     </div>
   );
 }

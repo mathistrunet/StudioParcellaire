@@ -56,6 +56,11 @@ export default defineConfig({
         target: "http://localhost:4174",
         changeOrigin: true,
       },
+      // Référentiels et couches : le backend les télécharge à la demande.
+      "/data": {
+        target: "http://localhost:4174",
+        changeOrigin: true,
+      },
     },
   },
   resolve: {
