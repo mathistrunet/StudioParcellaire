@@ -18,6 +18,16 @@ import { resolveParcelPoint } from "./soilgrids/geometry.mjs";
 import { soilGridsPixelKey } from "./soilgrids/homolosine.mjs";
 import { closeGeoPackageCache, queryGeoPackageByBbox } from "./geopackage-query.mjs";
 import { closeRpgRomaniaCache, queryRpgRomaniaByBbox } from "./rpg-romania-query.mjs";
+import {
+  DEFAULT_HOST,
+  DEFAULT_MAX_BODY_BYTES,
+  buildAccessPolicy,
+  getAccessDenial,
+  isLoopbackAddress,
+  prepareApiResponse,
+  readBody,
+  sendBodyError,
+} from "./http-security.mjs";
 import { ensureDatasetForBbox, ensureLayer } from "./layer-store.mjs";
 import {
   applyLayerUpdates,
@@ -26,6 +36,11 @@ import {
 } from "./layer-updates.mjs";
 
 const PORT = Number(process.env.PORT || 4174);
+// Local par défaut. L'exposition réseau demande les deux options STUDIO_HOST et
+// STUDIO_ALLOWED_ORIGINS (cf. README) : le serveur n'a pas d'authentification.
+const HOST = process.env.STUDIO_HOST || DEFAULT_HOST;
+const ACCESS_POLICY = buildAccessPolicy({ port: PORT, extraOrigins: process.env.STUDIO_ALLOWED_ORIGINS });
+const MAX_BODY_BYTES = Number(process.env.STUDIO_MAX_BODY_BYTES) || DEFAULT_MAX_BODY_BYTES;
 const DATA_DIR = path.resolve(process.cwd(), "data");
 // Application compilée : servie par ce même serveur quand elle existe, pour que le
 // lanceur n'ait qu'un seul processus à démarrer (pas de proxy /api à configurer).
@@ -514,17 +529,20 @@ async function serveStatic(requestUrl, res) {
   return sendFile(indexPath, res);
 }
 
-const server = http.createServer(async (req, res) => {
+const handleRequest = async (req, res) => {
   if (!req.url) return void res.end();
+
+  const denial = getAccessDenial(req, ACCESS_POLICY);
+  if (denial) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: denial }));
+    return;
+  }
+
   const requestUrl = parseUrl(req.url);
 
   if (requestUrl.pathname.startsWith("/api/parcels/") && requestUrl.pathname.endsWith("/soilgrids")) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
     // Le rate-limit est appliqué plus bas, uniquement sur les vrais appels ISRIC : un cache-hit
     // ou une requête mutualisée par pixel ne consomme pas le budget (cf. loadSoilGridsForParcel).
 
@@ -553,12 +571,7 @@ const server = http.createServer(async (req, res) => {
 
   // Remontée WRB-seule (nom de classe par parcelle), dédup par pixel, un seul appel ISRIC.
   if (requestUrl.pathname.startsWith("/api/parcels/") && requestUrl.pathname.endsWith("/wrb")) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const match = requestUrl.pathname.match(/^\/api\/parcels\/([^/]+)\/wrb$/);
     const parcelId = match?.[1];
@@ -579,11 +592,7 @@ const server = http.createServer(async (req, res) => {
 
   // État des couches : y a-t-il une version plus récente publiée ?
   if (requestUrl.pathname === "/api/layers/updates") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
+    if (prepareApiResponse(req, res, ["GET", "POST"])) return;
 
     try {
       if (req.method === "GET") {
@@ -608,21 +617,12 @@ const server = http.createServer(async (req, res) => {
       // Une vérification impossible n'est pas une erreur pour l'utilisateur :
       // l'application continue de fonctionner avec ses couches actuelles.
       res.end(JSON.stringify({ checkedAt: null, outdated: [], added: [], offline: true }));
-      return;
     }
-
-    res.writeHead(405);
-    res.end(JSON.stringify({ error: "Method not allowed." }));
     return;
   }
 
   if (requestUrl.pathname === "/api/soilgrids/grid") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const bbox = parseBboxParam(requestUrl.searchParams.get("bbox"));
     const limit = parseIntegerParam(requestUrl.searchParams.get("limit"), 5000, 1, 20000);
@@ -645,12 +645,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (requestUrl.pathname === "/api/soil/department") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const code = String(requestUrl.searchParams.get("code") || "")
       .trim()
@@ -707,12 +702,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname === "/api/toponymie/points") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const region = String(requestUrl.searchParams.get("region") || "")
       .trim()
@@ -773,12 +763,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname === "/api/rpg-romania") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const bbox = parseBboxParam(requestUrl.searchParams.get("bbox"));
     const limit = parseIntegerParam(requestUrl.searchParams.get("limit"), 1000, 1, 1000);
@@ -815,99 +800,80 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname.startsWith("/api/parcelles")) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,PUT,POST,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
+    if (prepareApiResponse(req, res, ["GET", "PUT", "POST"])) return;
     if (req.method === "GET") return void res.writeHead(200).end(JSON.stringify(await readCollection()));
 
     if (requestUrl.pathname.startsWith("/api/parcelles/matching/validate") && req.method === "POST") {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", async () => {
-        try {
-          const payload = JSON.parse(body);
-          const oldYear = Number(payload?.oldYear);
-          const newYear = Number(payload?.newYear);
-          if (!Number.isFinite(oldYear) || !Number.isFinite(newYear)) {
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: "Invalid year payload." }));
-            return;
-          }
-          const matches = Array.isArray(payload?.matches) ? payload.matches : [];
-          const correspondancesValidated = {};
-          matches.forEach((match) => {
-            const oldId = match?.oldId ?? match?.oldKey ?? match?.old;
-            const newId = match?.newId ?? match?.newKey ?? match?.new;
-            if (oldId != null && newId != null) correspondancesValidated[String(oldId)] = String(newId);
-          });
-
-          const collection = await readCollection();
-          const parcellesByYear = buildParcellesByYearFromFeatures(
-            Array.isArray(collection?.features) ? collection.features : []
-          );
-          const { parcellesByYear: mergedParcellesByYear } = applyCorrespondencesAndMerge({
-            parcellesByYear,
-            oldYear,
-            newYear,
-            correspondancesValidated,
-            dropOldYear: true,
-          });
-          const oldCollection = mergedParcellesByYear?.[oldYear] || emptyCollection();
-          const newCollection = mergedParcellesByYear?.[newYear] || emptyCollection();
-          const otherFeatures = (collection?.features || []).filter((feature) => {
-            const year = Number(feature?.properties?.annee);
-            if (!Number.isFinite(year)) return true;
-            return year !== oldYear && year !== newYear;
-          });
-          const mergedCollection = {
-            type: "FeatureCollection",
-            features: [...otherFeatures, ...(oldCollection.features || []), ...(newCollection.features || [])],
-          };
-
-          await writeCollection(mergedCollection);
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              status: "ok",
-              collection: mergedCollection,
-              parcellesOldYear: oldCollection,
-              parcellesNewYear: newCollection,
-            })
-          );
-        } catch (error) {
+      try {
+        const payload = JSON.parse(await readBody(req, MAX_BODY_BYTES));
+        const oldYear = Number(payload?.oldYear);
+        const newYear = Number(payload?.newYear);
+        if (!Number.isFinite(oldYear) || !Number.isFinite(newYear)) {
           res.writeHead(400);
-          res.end(JSON.stringify({ error: error?.message || "Invalid JSON payload." }));
+          res.end(JSON.stringify({ error: "Invalid year payload." }));
+          return;
         }
-      });
+        const matches = Array.isArray(payload?.matches) ? payload.matches : [];
+        const correspondancesValidated = {};
+        matches.forEach((match) => {
+          const oldId = match?.oldId ?? match?.oldKey ?? match?.old;
+          const newId = match?.newId ?? match?.newKey ?? match?.new;
+          if (oldId != null && newId != null) correspondancesValidated[String(oldId)] = String(newId);
+        });
+
+        const collection = await readCollection();
+        const parcellesByYear = buildParcellesByYearFromFeatures(
+          Array.isArray(collection?.features) ? collection.features : []
+        );
+        const { parcellesByYear: mergedParcellesByYear } = applyCorrespondencesAndMerge({
+          parcellesByYear,
+          oldYear,
+          newYear,
+          correspondancesValidated,
+          dropOldYear: true,
+        });
+        const oldCollection = mergedParcellesByYear?.[oldYear] || emptyCollection();
+        const newCollection = mergedParcellesByYear?.[newYear] || emptyCollection();
+        const otherFeatures = (collection?.features || []).filter((feature) => {
+          const year = Number(feature?.properties?.annee);
+          if (!Number.isFinite(year)) return true;
+          return year !== oldYear && year !== newYear;
+        });
+        const mergedCollection = {
+          type: "FeatureCollection",
+          features: [...otherFeatures, ...(oldCollection.features || []), ...(newCollection.features || [])],
+        };
+
+        await writeCollection(mergedCollection);
+        res.writeHead(200);
+        res.end(
+          JSON.stringify({
+            status: "ok",
+            collection: mergedCollection,
+            parcellesOldYear: oldCollection,
+            parcellesNewYear: newCollection,
+          })
+        );
+      } catch (error) {
+        sendBodyError(req, res, error);
+      }
       return;
     }
 
     if (req.method === "PUT") {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", async () => {
-        try {
-          const parsed = JSON.parse(body);
-          if (!parsed || parsed.type !== "FeatureCollection") {
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: "Invalid FeatureCollection payload." }));
-            return;
-          }
-          await writeCollection(parsed);
-          res.writeHead(200);
-          res.end(JSON.stringify({ status: "ok" }));
-        } catch (error) {
+      try {
+        const parsed = JSON.parse(await readBody(req, MAX_BODY_BYTES));
+        if (!parsed || parsed.type !== "FeatureCollection") {
           res.writeHead(400);
-          res.end(JSON.stringify({ error: error?.message || "Invalid JSON payload." }));
+          res.end(JSON.stringify({ error: "Invalid FeatureCollection payload." }));
+          return;
         }
-      });
+        await writeCollection(parsed);
+        res.writeHead(200);
+        res.end(JSON.stringify({ status: "ok" }));
+      } catch (error) {
+        sendBodyError(req, res, error);
+      }
       return;
     }
 
@@ -917,34 +883,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname.startsWith("/api/soil-type-mappings")) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,PUT,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
+    if (prepareApiResponse(req, res, ["GET", "PUT"])) return;
     if (req.method === "GET") return void res.writeHead(200).end(JSON.stringify(await readSoilMappings()));
-    if (req.method === "PUT") {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", async () => {
-        try {
-          const parsed = JSON.parse(body);
-          await writeSoilMappings(parsed);
-          res.writeHead(200);
-          res.end(JSON.stringify({ status: "ok" }));
-        } catch (error) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: error?.message || "Invalid JSON payload." }));
-        }
-      });
-      return;
+    try {
+      await writeSoilMappings(JSON.parse(await readBody(req, MAX_BODY_BYTES)));
+      res.writeHead(200);
+      res.end(JSON.stringify({ status: "ok" }));
+    } catch (error) {
+      sendBodyError(req, res, error);
     }
-
-    res.writeHead(405);
-    res.end(JSON.stringify({ error: "Method not allowed." }));
     return;
   }
 
@@ -963,10 +910,28 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404);
   res.end();
+};
+
+// Sans ce filet, une URL mal encodée (/data/%E0%A4%A) arrêtait tout le serveur.
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch((error) => {
+    const malformed = error instanceof URIError || error?.code === "ERR_INVALID_URL";
+    if (!malformed) log("REQUEST_ERROR", { url: req.url, message: error?.message || String(error) });
+    if (res.headersSent) return void res.destroy();
+    res.writeHead(malformed ? 400 : 500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: malformed ? "URL invalide." : "Erreur interne du serveur." }));
+  });
 });
 
-server.listen(PORT, () => {
-  console.log(`GeoJSON backend listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  if (isLoopbackAddress(HOST)) {
+    console.log(`GeoJSON backend listening on http://localhost:${PORT}`);
+  } else {
+    console.warn(
+      `[SECURITE] Serveur exposé sur le réseau (${HOST}:${PORT}), sans authentification. ` +
+        `Origines acceptées : ${[...ACCESS_POLICY.origins].join(", ")}`
+    );
+  }
   // Vérification des couches en tâche de fond : le résultat est prêt quand
   // l'interface le demande, et son échec n'empêche jamais le démarrage.
   scheduleStartupCheck();

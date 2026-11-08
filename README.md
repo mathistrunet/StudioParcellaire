@@ -44,6 +44,27 @@ npm run backend   # API locale sur le port 4174
 npm run dev       # interface sur http://localhost:5173
 ```
 
+### Sécurité du serveur local
+
+Le serveur n'a pas d'authentification. Il n'écoute donc que sur `127.0.0.1` et
+refuse les requêtes venant d'une autre origine que l'application (ports 4174 et
+5173) ou portant un en-tête `Host` non local. Ces réglages se changent par
+variables d'environnement :
+
+| Variable                 | Rôle                                                  | Défaut            |
+| ------------------------ | ----------------------------------------------------- | ----------------- |
+| `STUDIO_HOST`            | Adresse d'écoute                                      | `127.0.0.1`       |
+| `STUDIO_ALLOWED_ORIGINS` | Origines ajoutées, séparées par des virgules          | aucune            |
+| `STUDIO_MAX_BODY_BYTES`  | Taille maximale d'un corps PUT/POST (au-delà : `413`) | 100 Mo            |
+
+Exposer le serveur sur le réseau demande les deux premières options. Tout poste
+qui atteint alors le port peut lire et écraser le parcellaire : ne le faites
+que sur un réseau de confiance.
+
+```bash
+STUDIO_HOST=0.0.0.0 STUDIO_ALLOWED_ORIGINS=http://192.168.1.10:4174 npm run backend
+```
+
 ## Fonctionnement de l'outil
 
 Le bouton **Guide**, en haut à droite de l'application, ouvre une fenêtre qui

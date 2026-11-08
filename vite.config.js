@@ -52,13 +52,15 @@ export default defineConfig({
   build: { copyPublicDir: false },
   server: {
     proxy: {
+      // Adresse explicite : le backend n'écoute que sur 127.0.0.1, alors que
+      // « localhost » peut se résoudre d'abord en ::1 sous Windows.
       "/api": {
-        target: "http://localhost:4174",
+        target: "http://127.0.0.1:4174",
         changeOrigin: true,
       },
       // Référentiels et couches : le backend les télécharge à la demande.
       "/data": {
-        target: "http://localhost:4174",
+        target: "http://127.0.0.1:4174",
         changeOrigin: true,
       },
     },

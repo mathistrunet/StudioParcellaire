@@ -38,6 +38,7 @@ Fournir une couche locale simple de persistance et de services pour supporter l'
 ## Technique
 
 - serveur : `scripts/geojson-server.mjs`
+- regles d'acces (ecoute locale, origines, `Host`, taille des corps) : `scripts/http-security.mjs`, options dans le README
 - fichiers : `data/parcelles.geojson`, `data/soil-type-mappings.json`, `data/parcel-soilgrids-cache.json`
 
 ## Documentation utilisateur
