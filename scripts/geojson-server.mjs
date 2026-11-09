@@ -34,6 +34,9 @@ import { enrichParcelle } from "./enrich/enrich-service.mjs";
 import { createEnrichHandler } from "./enrich/enrich-route.mjs";
 import { createRpgWfsClient } from "./enrich/rpg-wfs-client.mjs";
 import { createToponymLookup } from "./enrich/toponym-lookup.mjs";
+import { creerCacheDisque } from "./donnees/cache-disque.mjs";
+import { creerClientGeoplateforme } from "./donnees/geoplateforme.mjs";
+import { creerRoutesDonnees } from "./donnees/routes.mjs";
 import {
   applyLayerUpdates,
   getLayerUpdateReport,
@@ -94,6 +97,14 @@ const rateLimitWindow = [];
 const ENRICH_MAX_BODY_BYTES = Math.min(MAX_BODY_BYTES, 5 * 1024 * 1024);
 const fetchRpgFeatures = createRpgWfsClient();
 const lookupToponym = createToponymLookup({ ensureLayer, queryGeoPackageByBbox });
+// API v1 des données publiques (relief, RPG, BD TOPO), avec cache disque à côté de la base.
+const routerDonnees = creerRoutesDonnees({
+  client: creerClientGeoplateforme({
+    cache: creerCacheDisque({ dossier: path.join(appDataDir, "cache", "geoplateforme") }),
+  }),
+  lireParcellaire: () => readCollection(),
+  signalerErreur: (error) => log("DONNEES_ERROR", { message: error?.message || String(error) }),
+});
 
 const emptyCollection = () => ({ type: "FeatureCollection", features: [] });
 const isFeatureCollection = (value) =>
@@ -528,6 +539,7 @@ const handleRequest = async (req, res) => {
   const requestUrl = parseUrl(req.url);
 
   if (requestUrl.pathname === "/api/v1/enrich") return handleEnrich(req, res);
+  if (await routerDonnees(req, res, requestUrl)) return;
 
   if (requestUrl.pathname.startsWith("/api/parcels/") && requestUrl.pathname.endsWith("/soilgrids")) {
     if (prepareApiResponse(req, res, ["GET"])) return;

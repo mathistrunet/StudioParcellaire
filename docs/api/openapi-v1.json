@@ -3,10 +3,277 @@
   "info": {
     "title": "API Studio Parcellaire",
     "version": "1.0.0",
-    "description": "Enrichissement sans état d'une parcelle à partir d'un point ou d'un contour. Rien n'est conservé côté serveur. Une évolution incompatible du contrat passe par un nouveau préfixe (/api/v2)."
+    "description": "Enrichissement sans état d'une parcelle à partir d'un point ou d'un contour, et lecture des données publiques (relief, RPG, BD TOPO) avec cache disque. Rien n'est écrit côté serveur, hormis ce cache. Une évolution incompatible du contrat passe par un nouveau préfixe (/api/v2)."
   },
   "servers": [{ "url": "http://localhost:4174", "description": "Serveur local" }],
   "paths": {
+    "/api/v1/parcelles": {
+      "get": {
+        "operationId": "lireParcelles",
+        "summary": "Parcellaire de l'utilisateur",
+        "description": "Lecture seule. Même contenu que GET /api/parcelles, sous un contrat stable.",
+        "responses": {
+          "200": {
+            "description": "FeatureCollection GeoJSON du parcellaire, toutes années confondues.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/terrain": {
+      "get": {
+        "operationId": "lireTerrain",
+        "summary": "Grille d'altitude ou de hauteur",
+        "description": "Une valeur float32 petit-boutiste par point, ligne par ligne du nord au sud et d'ouest en est : largeur × hauteur × 4 octets. Une valeur hors de ]-500 ; 9000[ (-9999, -99999) signifie « pas de donnée ». Les grandes grilles se demandent par tuiles de 1024 × 1024 au plus.",
+        "parameters": [
+          {
+            "name": "couche",
+            "in": "query",
+            "required": true,
+            "description": "mnt-lidar : relief LiDAR HD ; mnh-lidar : hauteur de la végétation et du bâti LiDAR HD ; rge-alti : relief RGE ALTI ; srtm : relief mondial à 90 m.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "mnt-lidar",
+                "mnh-lidar",
+                "rge-alti",
+                "srtm"
+              ]
+            }
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "required": true,
+            "description": "Emprise ouest,sud,est,nord en degrés WGS 84 (longitude d'abord), au plus 0,25° de côté.",
+            "schema": {
+              "type": "string",
+              "example": "1.9025,42.9901,1.9257,43.0047"
+            }
+          },
+          {
+            "name": "largeur",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            }
+          },
+          {
+            "name": "hauteur",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grille binaire.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide (code PARAMETRE_INVALIDE). L'IGN n'est pas appelé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "La GéoPlateforme ne répond pas ou renvoie une réponse invalide (code IGN_INDISPONIBLE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/rpg": {
+      "get": {
+        "operationId": "lireRpg",
+        "summary": "Parcelles du RPG d'une campagne",
+        "parameters": [
+          {
+            "name": "annee",
+            "in": "query",
+            "required": true,
+            "description": "Millésime publié par l'IGN.",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                2025,
+                2024,
+                2023,
+                2022,
+                2021,
+                2020,
+                2019,
+                2018,
+                2017,
+                2016,
+                2015
+              ]
+            }
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "required": true,
+            "description": "Emprise ouest,sud,est,nord en degrés WGS 84 (longitude d'abord), au plus 0,25° de côté.",
+            "schema": {
+              "type": "string",
+              "example": "1.9025,42.9901,1.9257,43.0047"
+            }
+          },
+          {
+            "name": "max",
+            "in": "query",
+            "required": false,
+            "description": "Nombre maximal d'objets (1 à 5000, 5000 par défaut).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 5000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Objets trouvés. `tronque` vaut true si l'emprise en contient plus que `max`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionObjets"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide (code PARAMETRE_INVALIDE). L'IGN n'est pas appelé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "La GéoPlateforme ne répond pas ou renvoie une réponse invalide (code IGN_INDISPONIBLE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bdtopo": {
+      "get": {
+        "operationId": "lireBdtopo",
+        "summary": "Objets de la BD TOPO",
+        "parameters": [
+          {
+            "name": "couche",
+            "in": "query",
+            "required": true,
+            "description": "batiments, routes (tronçons), surfaces-eau (plans d'eau), cours-eau (tronçons hydrographiques).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "batiments",
+                "routes",
+                "surfaces-eau",
+                "cours-eau"
+              ]
+            }
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "required": true,
+            "description": "Emprise ouest,sud,est,nord en degrés WGS 84 (longitude d'abord), au plus 0,25° de côté.",
+            "schema": {
+              "type": "string",
+              "example": "1.9025,42.9901,1.9257,43.0047"
+            }
+          },
+          {
+            "name": "max",
+            "in": "query",
+            "required": false,
+            "description": "Nombre maximal d'objets (1 à 5000, 5000 par défaut).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 5000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Objets trouvés. `tronque` vaut true si l'emprise en contient plus que `max`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionObjets"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide (code PARAMETRE_INVALIDE). L'IGN n'est pas appelé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "La GéoPlateforme ne répond pas ou renvoie une réponse invalide (code IGN_INDISPONIBLE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/enrich": {
       "post": {
         "operationId": "enrichParcelle",
@@ -68,6 +335,32 @@
   },
   "components": {
     "schemas": {
+      "CollectionObjets": {
+        "type": "object",
+        "required": [
+          "type",
+          "features",
+          "tronque"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "FeatureCollection"
+            ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Objets GeoJSON en CRS:84, propriétés telles que l'IGN les publie."
+          },
+          "tronque": {
+            "type": "boolean"
+          }
+        }
+      },
       "EnrichRequest": {
         "type": "object",
         "required": ["geometry", "millesimes"],
