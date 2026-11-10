@@ -64,8 +64,13 @@ function lireCulture(valeur, precision, libelleCulture) {
   return { code: null, precision: null, libelle: brut };
 }
 
+/**
+ * Identifiant de la parcelle. L'interface (normalizeParcellesCollection) rend `__id` et
+ * `feature.id` uniques mais garde l'`id` d'origine, qui peut être en double après un
+ * import : on prend donc d'abord les identifiants normalisés.
+ */
 export const idParcelle = (feature) =>
-  texte(feature?.properties?.id) ?? texte(feature?.properties?.__id) ?? texte(feature?.id);
+  texte(feature?.properties?.__id) ?? texte(feature?.id) ?? texte(feature?.properties?.id);
 
 export const anneeParcelle = (feature) => {
   const annee = Number(feature?.properties?.annee);

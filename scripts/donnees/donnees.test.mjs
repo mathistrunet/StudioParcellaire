@@ -311,6 +311,17 @@ describe("fiche parcelle", () => {
     expect(client.objets).toHaveBeenCalledTimes(3);
   });
 
+  it("prend l'identifiant normalisé quand l'id d'origine est en double", async () => {
+    // Ce que produit normalizeParcellesCollection après un import avec des id répétés.
+    const doublons = [
+      { ...parcelle({ id: "7", __id: "7", annee: 2025, nom: "A" }), id: "7" },
+      { ...parcelle({ id: "7", __id: "7-1", annee: 2025, nom: "B" }), id: "7-1" },
+    ];
+    const parcelles = service(doublons);
+    expect((await parcelles.lister({ rpg: false })).features.map((f) => f.id)).toEqual(["7", "7-1"]);
+    expect((await parcelles.lire("7-1", { rpg: false })).properties.nom).toBe("B");
+  });
+
   it("choisit l'année la plus récente, filtre par année et par identifiant", async () => {
     const features = [parcelle({ id: "x", annee: 2024 }), parcelle({ id: "y", annee: 2025 }), parcelle({ id: "z", annee: 2025 })];
     const parcelles = service(features);
