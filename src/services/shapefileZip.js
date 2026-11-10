@@ -1,5 +1,72 @@
 import shp from "shpjs";
+import JSZip from "jszip";
 import { toWgs84 } from "../utils/proj";
+import { chooseDbfEncoding, cpgForEncoding, createRecoder } from "./dbfEncoding.js";
+
+// Voir dbfEncoding.js : chaque .dbf est relu dans son vrai encodage
+// (sinon « RAY-GRASS DÉROBÉE » arrivait avec des « � »).
+export { detectDbfEncoding, resolveCpgEncoding, chooseDbfEncoding } from "./dbfEncoding.js";
+
+/**
+ * Écrit dans le ZIP un .cpg que shpjs comprend pour chaque .dbf non UTF-8.
+ * Renvoie le buffer à parser et, pour les pages DOS, les correcteurs à
+ * appliquer aux chaînes décodées, indexés par chemin sans extension.
+ */
+async function fixDbfEncodingInZip(buffer) {
+  const recoders = new Map();
+  let zip;
+  try {
+    zip = await JSZip.loadAsync(buffer);
+  } catch {
+    return { buffer, recoders }; // pas un ZIP lisible : shpjs remontera l'erreur
+  }
+  let changed = false;
+  for (const name of Object.keys(zip.files)) {
+    if (zip.files[name].dir || !/\.dbf$/i.test(name)) continue;
+    const base = name.slice(0, -4);
+    const cpgName = Object.keys(zip.files).find(
+      (n) => n.toLowerCase() === `${base}.cpg`.toLowerCase()
+    );
+    const cpgText = cpgName ? await zip.files[cpgName].async("string") : null;
+    const dbfBytes = await zip.files[name].async("uint8array");
+    const encoding = chooseDbfEncoding(dbfBytes, cpgText);
+    if (!encoding) continue;
+    if (cpgName) zip.remove(cpgName);
+    zip.file(`${base}.cpg`, cpgForEncoding(encoding));
+    const recoder = createRecoder(encoding);
+    if (recoder) recoders.set(base.toLowerCase(), recoder);
+    changed = true;
+  }
+  return {
+    buffer: changed ? await zip.generateAsync({ type: "arraybuffer" }) : buffer,
+    recoders,
+  };
+}
+
+function recodeProperties(properties, recoder) {
+  if (!properties) return properties;
+  const out = {};
+  for (const [key, value] of Object.entries(properties)) {
+    out[recoder(key)] = typeof value === "string" ? recoder(value) : value;
+  }
+  return out;
+}
+
+/** Applique les correcteurs DOS aux propriétés des couches concernées. */
+function applyRecoders(result, recoders) {
+  if (!recoders.size || !result) return result;
+  const collections = Array.isArray(result) ? result : [result];
+  const single = recoders.size === 1 && collections.length === 1;
+  for (const collection of collections) {
+    const key = String(collection?.fileName ?? "").toLowerCase();
+    const recoder = recoders.get(key) ?? (single ? [...recoders.values()][0] : null);
+    if (!recoder || !Array.isArray(collection?.features)) continue;
+    for (const feature of collection.features) {
+      feature.properties = recodeProperties(feature.properties, recoder);
+    }
+  }
+  return result;
+}
 
 function firstCoordinate(geometry) {
   if (!geometry) return null;
@@ -165,7 +232,8 @@ export async function parseShapefileZipToFeatures(fileOrBuffer) {
   if (!buffer) {
     throw new Error("SHAPE_ZIP: No data provided");
   }
-  const result = await shp(buffer);
+  const fixed = await fixDbfEncodingInZip(buffer);
+  const result = applyRecoders(await shp(fixed.buffer), fixed.recoders);
   const features = normalizeShapefileGeoJSON(result);
   if (!features.length) {
     throw new Error("SHAPE_ZIP: Aucune parcelle dans le shapefile");
