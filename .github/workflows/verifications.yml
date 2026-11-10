@@ -1,0 +1,69 @@
+# Vérifications automatiques : lancées sur chaque pull request et à chaque push sur main
+# ou Visuel3D. Une PR dont une vérification échoue l'affiche en rouge sur GitHub.
+name: Vérifications
+
+on:
+  pull_request:
+  push:
+    branches: [main, Visuel3D]
+
+permissions:
+  contents: read
+
+# Un nouveau push sur la même branche annule la vérification en cours, devenue inutile.
+concurrency:
+  group: verifications-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  application:
+    name: Application (lint, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # node:sqlite demande Node 22.13 ou plus récent (cf. package.json, engines).
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Tests
+        run: npx vitest run
+      - name: Build
+        run: npm run build
+
+  jeu:
+    name: Jeu (lint, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # Le jeu n'existe que sur la branche Visuel3D pour l'instant : ailleurs, rien à faire.
+      - name: Présence du jeu
+        id: presence
+        run: echo "jeu=$([ -f jeu/package.json ] && echo oui || echo non)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        if: steps.presence.outputs.jeu == 'oui'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: jeu/package-lock.json
+      - name: Installation
+        if: steps.presence.outputs.jeu == 'oui'
+        working-directory: jeu
+        run: npm ci
+      - name: Lint
+        if: steps.presence.outputs.jeu == 'oui'
+        working-directory: jeu
+        run: npm run lint
+      - name: Tests
+        if: steps.presence.outputs.jeu == 'oui'
+        working-directory: jeu
+        run: npx vitest run
+      - name: Build
+        if: steps.presence.outputs.jeu == 'oui'
+        working-directory: jeu
+        run: npm run build
