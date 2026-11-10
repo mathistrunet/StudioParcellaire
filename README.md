@@ -76,6 +76,19 @@ conservé côté serveur. Le contrat est dans
 curl -X POST http://localhost:4174/api/v1/enrich -H "Content-Type: application/json" -d '{"geometry":{"type":"Point","coordinates":[1.6,48.2]},"millesimes":[2025,2024]}'
 ```
 
+### API des données publiques
+
+Le serveur lit aussi, pour une emprise donnée, le relief et la hauteur de végétation
+(LiDAR HD, RGE ALTI, SRTM), le RPG et la BD TOPO de l'IGN : `GET /api/v1/terrain`,
+`/api/v1/rpg`, `/api/v1/bdtopo`. `GET /api/v1/parcelles` renvoie une fiche par parcelle
+(nom, surface, culture, bio, Télépac, précédents sur 5 à 7 ans complétés par le RPG). Les réponses de l'IGN sont gardées 30 jours dans
+`%APPDATA%\StudioParcellaire\cache\geoplateforme\`. Détail dans
+[FP-012](docs/fonctionnalites/FP-012-api-v1-donnees-publiques.md).
+
+```bash
+curl "http://localhost:4174/api/v1/bdtopo?couche=batiments&bbox=1.90,42.99,1.93,43.01"
+```
+
 ## Fonctionnement de l'outil
 
 Le bouton **Guide**, en haut à droite de l'application, ouvre une fenêtre qui
@@ -188,3 +201,7 @@ rien télécharger.
 npm run lint
 npm test
 ```
+
+Les mêmes vérifications (lint, tests, build), ainsi que celles du jeu quand le dossier
+`jeu/` existe, tournent automatiquement sur GitHub à chaque pull request et à chaque push
+sur `main` : voir [`.github/workflows/verifications.yml`](.github/workflows/verifications.yml).

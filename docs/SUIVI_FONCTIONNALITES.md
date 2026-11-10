@@ -35,6 +35,7 @@ Priorites recommandees :
 | FP-009 | Mapping des types de sols | Implante | P2 | Mapping par structure sauvegarde en backend | [FP-009](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-009-mapping-des-types-de-sols.md) |
 | FP-010 | Nommage automatique par toponymie | Implante | P2 | Automatisation disponible, a consolider metierement | [FP-010](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-010-nommage-automatique-par-toponymie.md) |
 | FP-011 | Backend local et API internes | Implante | P1 | Persistance et services d'acces locaux | [FP-011](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-011-backend-local-et-api-internes.md) |
+| FP-012 | API v1 : fiches parcelles et donnees publiques | Implante | P2 | Fiches parcelles avec historique, relief, RPG, BD TOPO, cache disque | [FP-012](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-012-api-v1-donnees-publiques.md) |
 
 ## 3. Points transverses a suivre
 

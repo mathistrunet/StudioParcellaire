@@ -18,6 +18,7 @@ Fournir une couche locale simple de persistance et de services pour supporter l'
 - lecture GeoPackage sols
 - lecture GeoPackage toponymie
 - enrichissement sans etat d'une parcelle : `POST /api/v1/enrich`, contrat dans `docs/api/openapi-v1.json`, service dans `scripts/enrich/`
+- fiches parcelles (nom, surface, culture, bio, Telepac, historique) et donnees publiques (relief, RPG, BD TOPO) : `GET /api/v1/parcelles`, `/api/v1/parcelles/{id}`, `GET /api/v1/terrain`, `/api/v1/rpg`, `/api/v1/bdtopo`, service dans `scripts/donnees/` (voir FP-012)
 
 ## Attendus fonctionnels
 
