@@ -7,6 +7,7 @@ import { creerCacheDisque } from "./cache-disque.mjs";
 import { DonneesInvalides, lireEmprise } from "./couches.mjs";
 import { creerClientGeoplateforme, urlAltitudes, urlObjets } from "./geoplateforme.mjs";
 import { creerRoutesDonnees } from "./routes.mjs";
+import { creerServiceParcelles } from "./fiche-parcelle.mjs";
 
 const EMPRISE = [1.6, 48.2, 1.61, 48.21];
 const BBOX = EMPRISE.join(",");
@@ -151,7 +152,10 @@ describe("routes /api/v1", () => {
   beforeAll(async () => {
     const router = creerRoutesDonnees({
       client: creerClientGeoplateforme({ fetchImpl, reprises: 0 }),
-      lireParcellaire: async () => ({ type: "FeatureCollection", features: [{ id: "p1" }] }),
+      parcelles: {
+        lister: async (options) => ({ type: "FeatureCollection", features: [{ id: "p1" }], options }),
+        lire: async (id) => (id === "p1" ? { type: "Feature", id } : null),
+      },
       signalerErreur,
     });
     serveur = http.createServer(async (req, res) => {
@@ -164,10 +168,19 @@ describe("routes /api/v1", () => {
   afterAll(() => new Promise((resolve) => serveur.close(resolve)));
   afterEach(() => fetchImpl.mockReset());
 
-  it("sert le parcellaire", async () => {
-    const res = await fetch(`${base}/api/v1/parcelles`);
+  it("sert les fiches parcelles avec leurs options", async () => {
+    const res = await fetch(`${base}/api/v1/parcelles?annee=2025&historique=7&rpg=non`);
     expect(res.status).toBe(200);
-    expect((await res.json()).features).toHaveLength(1);
+    expect(await res.json()).toMatchObject({ features: [{ id: "p1" }], options: { annee: 2025, historique: 7, rpg: false } });
+    const defaut = await (await fetch(`${base}/api/v1/parcelles`)).json();
+    expect(defaut.options).toEqual({ annee: null, historique: 5, rpg: true });
+  });
+
+  it("sert une fiche par identifiant, 404 si elle est inconnue", async () => {
+    expect((await fetch(`${base}/api/v1/parcelles/p1`)).status).toBe(200);
+    const absente = await fetch(`${base}/api/v1/parcelles/p9`);
+    expect(absente.status).toBe(404);
+    expect(await absente.json()).toMatchObject({ code: "PARCELLE_INCONNUE" });
   });
 
   it("sert une grille d'altitude en binaire", async () => {
@@ -196,6 +209,8 @@ describe("routes /api/v1", () => {
     [`/api/v1/rpg?annee=2014&bbox=${BBOX}`, "millésime"],
     [`/api/v1/bdtopo?couche=__proto__&bbox=${BBOX}`, "couche inconnue"],
     ["/api/v1/bdtopo?couche=routes", "bbox"],
+    ["/api/v1/parcelles?historique=9", "historique"],
+    ["/api/v1/parcelles?rpg=peut-etre", "rpg"],
   ])("refuse %s en 400 sans appeler l'IGN", async (chemin, message) => {
     const res = await fetch(`${base}${chemin}`);
     expect(res.status).toBe(400);
@@ -217,3 +232,92 @@ describe("routes /api/v1", () => {
   });
 });
 
+
+describe("fiche parcelle", () => {
+  // Carré d'environ 1,1 ha près de Foix ; le RPG de test a une parcelle identique.
+  const carre = (x = 1.9) => ({
+    type: "Polygon",
+    coordinates: [[[x, 43], [x + 0.001, 43], [x + 0.001, 43.001], [x, 43.001], [x, 43]]],
+  });
+  const parcelle = (properties, geometry = carre()) => ({ type: "Feature", geometry, properties });
+  const libelleCulture = (code) => ({ BTH: "Blé tendre d'hiver", MIS: "Maïs", PTR: "Prairie temporaire" })[code] ?? null;
+  const rpgParAnnee = { 2025: "PTR", 2024: "MIS", 2023: "BTH", 2022: "MIS" };
+  const clientRpg = (options = {}) => ({
+    objets: vi.fn(async ({ typeName }) => {
+      const annee = Number(typeName.match(/(\d{4})/)[1]);
+      if (options.panne === annee) throw new Error("HTTP 503");
+      const code = rpgParAnnee[annee];
+      return {
+        features: code ? [{ type: "Feature", geometry: carre(), properties: { code_cultu: code, ...(annee === 2025 ? { bio: "true" } : {}) } }] : [],
+        tronque: false,
+      };
+    }),
+  });
+  const service = (features, client = clientRpg()) =>
+    creerServiceParcelles({ lireParcellaire: async () => ({ type: "FeatureCollection", features }), client, libelleCulture });
+
+  it("lit les alias du parcellaire et rend toujours les mêmes champs", async () => {
+    const telepac = parcelle({
+      id: "a", annee: 2025, nom_affiche: "1-1", code_culture: "PTR", isOrganic: true, organicType: "AB",
+      pacage: "009009507", ilot_numero: 1, numero: 1, commune_insee: "09161", cultureN1: "MIS",
+    });
+    const resultat = await service([telepac]).lister({ historique: 2, rpg: false });
+    expect(resultat).toMatchObject({ annee: 2025, annees_disponibles: [2025] });
+    expect(resultat.features[0].properties).toMatchObject({
+      id: "a", nom: "1-1", surface_source: "calculee", bio: true, type_bio: "AB", bio_source: "parcellaire",
+      culture: { code: "PTR", libelle: "Prairie temporaire" },
+      telepac: { pacage: "009009507", ilot: "1", numero: "1", commune_insee: "09161" },
+      historique: [
+        { annee: 2025, code: "PTR", source: "parcellaire" },
+        { annee: 2024, code: "MIS", libelle: "Maïs", source: "parcellaire" },
+      ],
+    });
+    expect(resultat.features[0].properties.surface_ha).toBeGreaterThan(0.8);
+  });
+
+  it("préfère la surface saisie et comprend un CSV Assolia", async () => {
+    const csv = parcelle({ id: "b", annee: 2025, nom: "Les Grissets", surface_parcelle: "4,25", parcelle_bio: "Non", cultureN: "BTH|001" });
+    const { properties } = (await service([csv]).lister({ historique: 1, rpg: false })).features[0];
+    expect(properties).toMatchObject({ nom: "Les Grissets", surface_ha: 4.25, surface_source: "saisie", bio: false });
+    expect(properties.culture).toEqual({ code: "BTH", precision: "001", libelle: "Blé tendre d'hiver" });
+  });
+
+  it("complète l'historique par le RPG et signale les écarts avec la saisie", async () => {
+    const saisie = parcelle({ id: "c", annee: 2025, code_culture: "PTR", cultureN_1: "BTH" });
+    const { properties } = (await service([saisie]).lister({ historique: 5 })).features[0];
+    expect(properties.historique.map(({ annee, code, source }) => [annee, code, source])).toEqual([
+      [2025, "PTR", "parcellaire"],
+      [2024, "BTH", "parcellaire"],
+      [2023, "BTH", "rpg"],
+      [2022, "MIS", "rpg"],
+      [2021, null, "inconnue"],
+    ]);
+    expect(properties.historique[1].ecart_rpg).toEqual({ code: "MIS", libelle: "Maïs" });
+    expect(properties).toMatchObject({ bio: true, bio_source: "rpg" });
+  });
+
+  it("garde la fiche quand une année RPG est indisponible", async () => {
+    const saisie = parcelle({ id: "d", annee: 2025, code_culture: "PTR" });
+    const { properties } = (await service([saisie], clientRpg({ panne: 2024 })).lister({ historique: 3 })).features[0];
+    expect(properties.historique[1]).toMatchObject({ annee: 2024, source: "inconnue" });
+    expect(properties.historique[2]).toMatchObject({ annee: 2023, source: "rpg" });
+    expect(properties.avertissements).toEqual([{ code: "RPG_INDISPONIBLE", message: "RPG 2024 non lu : HTTP 503." }]);
+  });
+
+  it("lit le RPG une fois par année pour des parcelles voisines", async () => {
+    const client = clientRpg();
+    const voisines = [1.9, 1.902, 1.904].map((x, i) => parcelle({ id: `v${i}`, annee: 2025 }, carre(x)));
+    await service(voisines, client).lister({ historique: 3 });
+    expect(client.objets).toHaveBeenCalledTimes(3);
+  });
+
+  it("choisit l'année la plus récente, filtre par année et par identifiant", async () => {
+    const features = [parcelle({ id: "x", annee: 2024 }), parcelle({ id: "y", annee: 2025 }), parcelle({ id: "z", annee: 2025 })];
+    const parcelles = service(features);
+    expect((await parcelles.lister({ rpg: false })).features.map((f) => f.id)).toEqual(["y", "z"]);
+    expect((await parcelles.lister({ annee: 2024, rpg: false })).features.map((f) => f.id)).toEqual(["x"]);
+    expect((await parcelles.lire("z", { rpg: false })).id).toBe("z");
+    expect(await parcelles.lire("x", { rpg: false })).toBeNull();
+    await expect(parcelles.lister({ annee: 2019 })).rejects.toThrow("Années disponibles : 2025, 2024");
+  });
+});

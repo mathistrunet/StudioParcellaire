@@ -13,7 +13,7 @@
 - [FP-009 - Mapping des types de sols](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-009-mapping-des-types-de-sols.md)
 - [FP-010 - Nommage automatique par toponymie](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-010-nommage-automatique-par-toponymie.md)
 - [FP-011 - Backend local et API internes](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-011-backend-local-et-api-internes.md)
-- [FP-012 - API v1 des donnees publiques](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-012-api-v1-donnees-publiques.md)
+- [FP-012 - API v1 : fiches parcelles et donnees publiques](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-012-api-v1-donnees-publiques.md)
 
 ## Mode d'utilisation
 

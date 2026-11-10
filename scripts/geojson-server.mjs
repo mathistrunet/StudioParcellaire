@@ -35,6 +35,8 @@ import { createEnrichHandler } from "./enrich/enrich-route.mjs";
 import { createRpgWfsClient } from "./enrich/rpg-wfs-client.mjs";
 import { createToponymLookup } from "./enrich/toponym-lookup.mjs";
 import { creerCacheDisque } from "./donnees/cache-disque.mjs";
+import { creerLibelles } from "./donnees/cultures.mjs";
+import { creerServiceParcelles } from "./donnees/fiche-parcelle.mjs";
 import { creerClientGeoplateforme } from "./donnees/geoplateforme.mjs";
 import { creerRoutesDonnees } from "./donnees/routes.mjs";
 import {
@@ -97,12 +99,18 @@ const rateLimitWindow = [];
 const ENRICH_MAX_BODY_BYTES = Math.min(MAX_BODY_BYTES, 5 * 1024 * 1024);
 const fetchRpgFeatures = createRpgWfsClient();
 const lookupToponym = createToponymLookup({ ensureLayer, queryGeoPackageByBbox });
-// API v1 des données publiques (relief, RPG, BD TOPO), avec cache disque à côté de la base.
+// API v1 : fiches parcelles et données publiques (relief, RPG, BD TOPO), avec cache
+// disque des réponses de l'IGN à côté de la base.
+const clientGeoplateforme = creerClientGeoplateforme({
+  cache: creerCacheDisque({ dossier: path.join(appDataDir, "cache", "geoplateforme") }),
+});
 const routerDonnees = creerRoutesDonnees({
-  client: creerClientGeoplateforme({
-    cache: creerCacheDisque({ dossier: path.join(appDataDir, "cache", "geoplateforme") }),
+  client: clientGeoplateforme,
+  parcelles: creerServiceParcelles({
+    lireParcellaire: () => readCollection(),
+    client: clientGeoplateforme,
+    libelleCulture: creerLibelles(),
   }),
-  lireParcellaire: () => readCollection(),
   signalerErreur: (error) => log("DONNEES_ERROR", { message: error?.message || String(error) }),
 });
 

@@ -9,16 +9,146 @@
   "paths": {
     "/api/v1/parcelles": {
       "get": {
-        "operationId": "lireParcelles",
-        "summary": "Parcellaire de l'utilisateur",
-        "description": "Lecture seule. Même contenu que GET /api/parcelles, sous un contrat stable.",
+        "operationId": "listerFichesParcelles",
+        "summary": "Fiches parcelles d'une campagne",
+        "description": "Une fiche par parcelle de l'année : nom, surface, culture, bio, Télépac et historique des cultures. Le parcellaire saisi fait foi ; le RPG complète les années sans saisie (source « rpg ») et signale les écarts (ecart_rpg). Une année RPG illisible ajoute un avertissement sans faire échouer la réponse. Lecture seule.",
+        "parameters": [
+          {
+            "name": "annee",
+            "in": "query",
+            "required": false,
+            "description": "Campagne du parcellaire. Par défaut, la plus récente présente.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "historique",
+            "in": "query",
+            "required": false,
+            "description": "Nombre d'années d'historique, année demandée comprise (1 à 7).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 7,
+              "default": 5
+            }
+          },
+          {
+            "name": "rpg",
+            "in": "query",
+            "required": false,
+            "description": "non : historique et bio tirés du seul parcellaire, sans appel au RPG (réponse en quelques dixièmes de seconde au lieu d'environ 2 s pour 30 parcelles sur 7 ans).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "oui",
+                "non"
+              ],
+              "default": "oui"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "FeatureCollection GeoJSON du parcellaire, toutes années confondues.",
+            "description": "Fiches de l'année.",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/FichesParcelles"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide, ou année absente du parcellaire (code PARAMETRE_INVALIDE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/parcelles/{id}": {
+      "get": {
+        "operationId": "lireFicheParcelle",
+        "summary": "Fiche d'une parcelle",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "annee",
+            "in": "query",
+            "required": false,
+            "description": "Campagne du parcellaire. Par défaut, la plus récente présente.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "historique",
+            "in": "query",
+            "required": false,
+            "description": "Nombre d'années d'historique, année demandée comprise (1 à 7).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 7,
+              "default": 5
+            }
+          },
+          {
+            "name": "rpg",
+            "in": "query",
+            "required": false,
+            "description": "non : historique et bio tirés du seul parcellaire, sans appel au RPG (réponse en quelques dixièmes de seconde au lieu d'environ 2 s pour 30 parcelles sur 7 ans).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "oui",
+                "non"
+              ],
+              "default": "oui"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "La fiche.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FicheParcelle"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide, ou année absente du parcellaire (code PARAMETRE_INVALIDE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Identifiant inconnu pour cette année (code PARCELLE_INCONNUE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -335,6 +465,233 @@
   },
   "components": {
     "schemas": {
+      "FichesParcelles": {
+        "type": "object",
+        "required": [
+          "type",
+          "annee",
+          "annees_disponibles",
+          "features"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "FeatureCollection"
+            ]
+          },
+          "annee": {
+            "type": "integer"
+          },
+          "annees_disponibles": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Années du parcellaire, la plus récente d'abord."
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FicheParcelle"
+            }
+          }
+        }
+      },
+      "FicheParcelle": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "geometry",
+          "properties"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "Feature"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "geometry": {
+            "type": "object",
+            "nullable": true,
+            "description": "Contour saisi (CRS:84)."
+          },
+          "properties": {
+            "type": "object",
+            "required": [
+              "id",
+              "annee",
+              "nom",
+              "surface_ha",
+              "surface_source",
+              "culture",
+              "bio",
+              "type_bio",
+              "bio_source",
+              "telepac",
+              "historique",
+              "avertissements"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "annee": {
+                "type": "integer"
+              },
+              "nom": {
+                "type": "string",
+                "nullable": true
+              },
+              "surface_ha": {
+                "type": "number",
+                "nullable": true
+              },
+              "surface_source": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "saisie",
+                  "calculee",
+                  null
+                ],
+                "description": "saisie : surface enregistrée ; calculee : aire du contour."
+              },
+              "culture": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Code culture PAC ; null pour un texte libre saisi."
+                  },
+                  "precision": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "libelle": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "description": "Culture de l'année selon le parcellaire, null si non saisie."
+              },
+              "bio": {
+                "type": "boolean",
+                "nullable": true
+              },
+              "type_bio": {
+                "type": "string",
+                "nullable": true,
+                "description": "AB, CONV… quand bio vaut true."
+              },
+              "bio_source": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "parcellaire",
+                  "rpg",
+                  null
+                ]
+              },
+              "telepac": {
+                "type": "object",
+                "properties": {
+                  "pacage": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "ilot": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "numero": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "commune_insee": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                }
+              },
+              "historique": {
+                "type": "array",
+                "description": "Année demandée puis précédentes, de la plus récente à la plus ancienne.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "annee",
+                    "code",
+                    "precision",
+                    "libelle",
+                    "source"
+                  ],
+                  "properties": {
+                    "annee": {
+                      "type": "integer"
+                    },
+                    "code": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "precision": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "libelle": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "parcellaire",
+                        "rpg",
+                        "inconnue"
+                      ]
+                    },
+                    "ecart_rpg": {
+                      "type": "object",
+                      "description": "Présent quand le RPG déclare une autre culture que la saisie.",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "libelle": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "avertissements": {
+                "type": "array",
+                "description": "Codes : RPG_INDISPONIBLE, RPG_TRONQUE.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "CollectionObjets": {
         "type": "object",
         "required": [

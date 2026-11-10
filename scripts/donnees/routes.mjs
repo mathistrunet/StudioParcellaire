@@ -2,7 +2,9 @@
  * Routes GET de l'API v1 des données publiques. L'accès (Host, Origin) est contrôlé en
  * amont par le serveur ; ces routes ne font que lire. Contrat : docs/api/openapi-v1.json.
  *
- *   /api/v1/parcelles  parcellaire de l'utilisateur (GeoJSON)
+ *   /api/v1/parcelles       fiches parcelles d'une année (GeoJSON) : nom, surface, culture,
+ *                           bio, Télépac, historique des cultures
+ *   /api/v1/parcelles/{id}  la fiche d'une parcelle
  *   /api/v1/terrain    grille d'altitude (float32), couche mnt-lidar | mnh-lidar | rge-alti | srtm
  *   /api/v1/rpg        parcelles du RPG d'une année (GeoJSON)
  *   /api/v1/bdtopo     objets BD TOPO (GeoJSON), couche batiments | routes | surfaces-eau | cours-eau
@@ -20,9 +22,11 @@ import {
   lireEmprise,
   lireEntier,
 } from "./couches.mjs";
+import { HISTORIQUE_DEFAUT, HISTORIQUE_MAX } from "./fiche-parcelle.mjs";
 import { IgnIndisponible } from "./geoplateforme.mjs";
 
 export const ROUTES_DONNEES = ["/api/v1/parcelles", "/api/v1/terrain", "/api/v1/rpg", "/api/v1/bdtopo"];
+const ROUTE_FICHE = /^\/api\/v1\/parcelles\/([^/]+)$/;
 
 const envoyerJson = (res, status, contenu) => {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -32,15 +36,30 @@ const envoyerJson = (res, status, contenu) => {
 const lireMax = (params) =>
   lireEntier(params.get("max"), { nom: "max", min: 1, max: OBJETS_MAX, defaut: OBJETS_MAX });
 
+class RessourceAbsente extends Error {}
+
+/** annee (facultative : la plus récente), historique (1 à 7 ans), rpg=non pour s'en passer. */
+function optionsFiches(params) {
+  const rpg = params.get("rpg");
+  if (rpg !== null && rpg !== "oui" && rpg !== "non") throw new DonneesInvalides("rpg vaut oui ou non.");
+  return {
+    annee: params.get("annee") === null ? null : lireEntier(params.get("annee"), { nom: "annee", min: 1990, max: 2100 }),
+    historique: lireEntier(params.get("historique"), {
+      nom: "historique", min: 1, max: HISTORIQUE_MAX, defaut: HISTORIQUE_DEFAUT,
+    }),
+    rpg: rpg !== "non",
+  };
+}
+
 /**
  * @param client       client GéoPlateforme (creerClientGeoplateforme)
- * @param lireParcellaire  () => Promise<FeatureCollection>
+ * @param parcelles    service des fiches parcelles (creerServiceParcelles)
  * @returns (req, res, url) => Promise<boolean> : false si la route n'est pas la sienne
  */
-export function creerRoutesDonnees({ client, lireParcellaire, signalerErreur = () => {} }) {
+export function creerRoutesDonnees({ client, parcelles, signalerErreur = () => {} }) {
   const routes = {
-    async "/api/v1/parcelles"() {
-      return { json: await lireParcellaire() };
+    async "/api/v1/parcelles"(params) {
+      return { json: await parcelles.lister(optionsFiches(params)) };
     },
     async "/api/v1/terrain"(params) {
       const largeur = lireEntier(params.get("largeur"), { nom: "largeur", min: 1, max: TUILE_MAX });
@@ -62,7 +81,15 @@ export function creerRoutesDonnees({ client, lireParcellaire, signalerErreur = (
   };
 
   return async function routerDonnees(req, res, url) {
-    const route = Object.hasOwn(routes, url.pathname) ? routes[url.pathname] : null;
+    const fiche = url.pathname.match(ROUTE_FICHE);
+    const route = fiche
+      ? async (params) => {
+        const id = decodeURIComponent(fiche[1]);
+        const trouvee = await parcelles.lire(id, optionsFiches(params));
+        if (!trouvee) throw new RessourceAbsente(`Parcelle ${id} introuvable pour cette année.`);
+        return { json: trouvee };
+      }
+      : Object.hasOwn(routes, url.pathname) ? routes[url.pathname] : null;
     if (!route) return false;
     if (prepareApiResponse(req, res, ["GET"])) return true;
     try {
@@ -77,7 +104,9 @@ export function creerRoutesDonnees({ client, lireParcellaire, signalerErreur = (
         envoyerJson(res, 200, resultat.json);
       }
     } catch (error) {
-      if (error instanceof DonneesInvalides) {
+      if (error instanceof RessourceAbsente) {
+        envoyerJson(res, 404, { error: error.message, code: "PARCELLE_INCONNUE" });
+      } else if (error instanceof DonneesInvalides) {
         envoyerJson(res, 400, { error: error.message, code: error.code });
       } else if (error instanceof IgnIndisponible) {
         signalerErreur(error);

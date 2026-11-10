@@ -80,8 +80,8 @@ curl -X POST http://localhost:4174/api/v1/enrich -H "Content-Type: application/j
 
 Le serveur lit aussi, pour une emprise donnée, le relief et la hauteur de végétation
 (LiDAR HD, RGE ALTI, SRTM), le RPG et la BD TOPO de l'IGN : `GET /api/v1/terrain`,
-`/api/v1/rpg`, `/api/v1/bdtopo`. `GET /api/v1/parcelles` renvoie le parcellaire en
-lecture seule. Les réponses de l'IGN sont gardées 30 jours dans
+`/api/v1/rpg`, `/api/v1/bdtopo`. `GET /api/v1/parcelles` renvoie une fiche par parcelle
+(nom, surface, culture, bio, Télépac, précédents sur 5 à 7 ans complétés par le RPG). Les réponses de l'IGN sont gardées 30 jours dans
 `%APPDATA%\StudioParcellaire\cache\geoplateforme\`. Détail dans
 [FP-012](docs/fonctionnalites/FP-012-api-v1-donnees-publiques.md).
 
