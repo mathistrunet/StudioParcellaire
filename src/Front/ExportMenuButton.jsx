@@ -719,11 +719,13 @@ export default function ExportMenuButton({
       firstProps.code_exploitation || firstProps.pacage || firstProps.numero_pacage || ""
     ).trim();
     if (encartExploitation || encartPacage) {
-      setCsvValues((prev) => ({
-        ...prev,
-        exploitation: encartExploitation || prev.exploitation,
-        codeExploitation: encartPacage || prev.codeExploitation,
-      }));
+      // Valeur et non fonction : setCsvValues compare la structure cible de
+      // l'objet reçu pour oublier les remplacements de cultures.
+      setCsvValues({
+        ...csvValues,
+        exploitation: encartExploitation || csvValues.exploitation,
+        codeExploitation: encartPacage || csvValues.codeExploitation,
+      });
     }
     setShapefileValues((prev) => ({
       ...prev,
