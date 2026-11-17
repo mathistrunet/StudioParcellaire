@@ -7,6 +7,89 @@
   },
   "servers": [{ "url": "http://localhost:4174", "description": "Serveur local" }],
   "paths": {
+    "/api/v1/meteo": {
+      "get": {
+        "operationId": "lireMeteo",
+        "summary": "Météo journalière d'un point (Open-Meteo), complétée par les normales",
+        "description": "Températures minimale et maximale et pluie de chaque jour, de debut à fin inclus, sur la maille de 0,1° du point. Mesures (ERA5 / ERA5-Land) jusqu'à la veille, normales 2015-2024 au-delà ou pour un jour manquant. Réponses gardées en cache disque. Données Open-Meteo, licence CC BY 4.0.",
+        "parameters": [
+          {
+            "name": "lat",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90
+            }
+          },
+          {
+            "name": "lon",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180
+            }
+          },
+          {
+            "name": "debut",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2025-07-01"
+            },
+            "description": "Au plus tôt le 1950-01-01."
+          },
+          {
+            "name": "fin",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-30"
+            },
+            "description": "Au plus 800 jours après debut, et moins d'un an après aujourd'hui."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Série complète, un objet par jour.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SerieMeteo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide (code PARAMETRE_INVALIDE). Open-Meteo n'est pas appelé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Open-Meteo ne répond pas ou renvoie une réponse invalide (code METEO_INDISPONIBLE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/parcelles": {
       "get": {
         "operationId": "listerFichesParcelles",
@@ -336,14 +419,15 @@
             "name": "couche",
             "in": "query",
             "required": true,
-            "description": "batiments, routes (tronçons), surfaces-eau (plans d'eau), cours-eau (tronçons hydrographiques).",
+            "description": "batiments, routes (tronçons), surfaces-eau (plans d'eau), cours-eau (tronçons hydrographiques), haies (lignes).",
             "schema": {
               "type": "string",
               "enum": [
                 "batiments",
                 "routes",
                 "surfaces-eau",
-                "cours-eau"
+                "cours-eau",
+                "haies"
               ]
             }
           },
@@ -465,6 +549,79 @@
   },
   "components": {
     "schemas": {
+      "SerieMeteo": {
+        "type": "object",
+        "properties": {
+          "maille": {
+            "type": "object",
+            "description": "Centre de la maille de 0,1° où le point a été ramené.",
+            "properties": {
+              "lat": {
+                "type": "number"
+              },
+              "lon": {
+                "type": "number"
+              }
+            }
+          },
+          "altitude": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "fournisseur": {
+            "type": "string"
+          },
+          "licence": {
+            "type": "string"
+          },
+          "normales": {
+            "type": "string"
+          },
+          "jours": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "date",
+                "tmin",
+                "tmax",
+                "source"
+              ],
+              "properties": {
+                "date": {
+                  "type": "string",
+                  "format": "date",
+                  "description": "Jour civil du lieu."
+                },
+                "tmin": {
+                  "type": "number",
+                  "description": "°C à 2 m"
+                },
+                "tmax": {
+                  "type": "number",
+                  "description": "°C à 2 m"
+                },
+                "pluie": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "description": "mm"
+                },
+                "source": {
+                  "enum": [
+                    "observee",
+                    "normale"
+                  ],
+                  "description": "normale : moyenne 2015-2024 du jour, lissée sur 15 jours, faute de mesure."
+                }
+              }
+            }
+          }
+        }
+      },
       "FichesParcelles": {
         "type": "object",
         "required": [

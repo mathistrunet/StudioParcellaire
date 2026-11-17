@@ -129,7 +129,7 @@ Notes :
 
 - l'export XML permet de choisir la colonne culture a utiliser
 - l'export CSV demande des informations de structure et d'exploitation
-- un export shapefile existe dans le code mais n'est pas expose comme export principal dans le menu courant
+- l'acceptation par Assolia du shapefile exporte (format Geofolia) reste a confirmer sur un vrai import
 
 ## 7. Donnees et persistance
 

@@ -1,6 +1,6 @@
 /**
  * Fiche parcelle de l'API v1 : une vue unique et stable d'une parcelle (nom, surface,
- * culture, bio, Télépac, historique des cultures), commune à ASSOLIA, au Studio et au jeu.
+ * culture, bio, Télépac, historique des cultures), commune à ASSOLIA et au Studio.
  *
  * Le parcellaire enregistré range une même information sous des clés différentes selon
  * sa provenance (Télépac XML, CSV Assolia, shapefile, saisie). Ce module LIT tous ces

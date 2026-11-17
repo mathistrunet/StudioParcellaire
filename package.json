@@ -20,12 +20,10 @@
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "^1.5.1",
-    "@mapbox/shp-write": "^0.4.3",
     "@turf/boolean-point-in-polygon": "^7.4.0",
     "@turf/buffer": "^7.3.4",
     "@turf/centroid": "^7.3.4",
     "@xmldom/xmldom": "^0.8.11",
-    "dbf": "^0.2.0",
     "jszip": "^3.10.1",
     "maplibre-gl": "^6.17.0",
     "pako": "^2.1.0",

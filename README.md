@@ -202,6 +202,5 @@ npm run lint
 npm test
 ```
 
-Les mêmes vérifications (lint, tests, build), ainsi que celles du jeu quand le dossier
-`jeu/` existe, tournent automatiquement sur GitHub à chaque pull request et à chaque push
+Les mêmes vérifications (lint, tests, build) tournent automatiquement sur GitHub à chaque pull request et à chaque push
 sur `main` : voir [`.github/workflows/verifications.yml`](.github/workflows/verifications.yml).

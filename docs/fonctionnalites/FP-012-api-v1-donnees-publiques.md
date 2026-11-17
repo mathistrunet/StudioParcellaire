@@ -8,15 +8,13 @@
 
 Disposer d'une fiche parcelle unique et stable (nom, surface, culture, bio, references
 Telepac, historique des cultures sur 5 a 7 ans), quelle que soit la provenance du
-parcellaire (Telepac XML, CSV Assolia, shapefile, saisie), pour ASSOLIA, le Studio et le jeu.
+parcellaire (Telepac XML, CSV Assolia, shapefile, saisie), pour ASSOLIA et le Studio.
 
 Lire aussi le relief, la vegetation, le RPG et la BD TOPO autour de son exploitation par le
 serveur local, plutot que depuis le navigateur. Les donnees deja telechargees sont gardees
 sur le poste : une deuxieme ouverture est rapide et ne sollicite plus l'IGN.
 
-Premier client : le jeu de gestion de ferme (branche `Visuel3D`, dossier `jeu/`), qui ne
-lit les donnees publiques qu'a travers cette API. La carte et les exports ASSOLIA pourront
-s'en servir aussi.
+La carte et les exports ASSOLIA pourront s'en servir.
 
 ## Perimetre actuel
 
@@ -26,7 +24,8 @@ s'en servir aussi.
 | `GET /api/v1/parcelles/{id}` | Fiche d'une parcelle | Idem |
 | `GET /api/v1/terrain` | Grille d'altitude ou de hauteur, binaire float32 | WMS GeoPlateforme |
 | `GET /api/v1/rpg` | Parcelles du RPG d'une campagne (2015 a 2025) | WFS GeoPlateforme |
-| `GET /api/v1/bdtopo` | Batiments, routes, plans d'eau, cours d'eau | WFS GeoPlateforme |
+| `GET /api/v1/bdtopo` | Batiments, routes, plans d'eau, cours d'eau, haies | WFS GeoPlateforme |
+| `GET /api/v1/meteo` | Meteo journaliere d'un point (Tmin, Tmax, pluie), completee par les normales | Open-Meteo (hors IGN) |
 
 Contrat detaille (parametres, formats, erreurs) : `docs/api/openapi-v1.json`.
 
@@ -70,6 +69,21 @@ Les libelles viennent des memes fichiers que l'interface : `public/codebookV2.js
 Le client choisit la source et combine : par exemple LiDAR HD d'abord, puis RGE ALTI la ou
 le LiDAR manque.
 
+### Meteo
+
+Parametres : `lat`, `lon` (degres WGS 84), `debut`, `fin` (AAAA-MM-JJ, inclus, 800 jours
+au plus, `fin` a moins d'un an d'aujourd'hui).
+
+- Source : Open-Meteo, API *Historical Weather* (reanalyses ERA5 / ERA5-Land de Copernicus),
+  gratuite et sans cle pour un usage non commercial, licence CC BY 4.0. Seule source hors
+  IGN de l'API v1.
+- Le point est ramene a une maille de 0,1 deg (resolution d'ERA5-Land) : toutes les
+  parcelles d'une ferme partagent la meme serie et la meme requete.
+- Mesures jusqu'a la veille ; chaque jour sans mesure (futur ou pas encore publie) prend la
+  normale du jour : moyenne 2015-2024 de la maille, lissee sur 15 jours. Chaque jour porte
+  `source: observee` ou `source: normale`.
+- Jours civils du lieu (`timezone=auto`).
+
 ## Attendus fonctionnels
 
 - seules les couches listees sont servies : l'API n'est pas un relais ouvert vers l'IGN
@@ -82,6 +96,7 @@ le LiDAR manque.
 
 | Parametre | Regle | Pourquoi |
 | --- | --- | --- |
+| `debut`, `fin` (meteo) | 800 jours au plus, depuis 1950 | Une campagne et demie ; ERA5 commence en 1940 |
 | `bbox` | `ouest,sud,est,nord` en degres, au plus 0,25 deg de cote | Une ferme tient dans 20 km ; au-dela, des centaines de Mo |
 | `largeur`, `hauteur` | 1 a 1024 points | Une reponse tient dans 4 Mo ; les grandes grilles se demandent par tuiles |
 | `max` | 1 a 5000 objets, 5000 par defaut | `tronque: true` signale qu'il en existe davantage |
@@ -93,6 +108,9 @@ le LiDAR manque.
 - cache disque : `%APPDATA%\StudioParcellaire\cache\geoplateforme\`, un fichier par
   requete IGN, nomme par l'empreinte SHA-256 de l'URL, valable 30 jours. Le dossier peut
   etre supprime a tout moment.
+- cache meteo : dossier `cache/meteo` a cote du precedent, meme principe, valable
+  10 ans. L'URL des mesures finit a la veille : elle change chaque jour, la serie se
+  complete donc d'elle-meme ; la serie des normales (2015-2024) ne change jamais.
 
 ## Technique
 
@@ -103,8 +121,10 @@ le LiDAR manque.
 | `scripts/donnees/cache-disque.mjs` | Cache fichier avec ecriture atomique et expiration |
 | `scripts/donnees/fiche-parcelle.mjs` | Fiche parcelle : lecture des alias, historique, rapprochement RPG |
 | `scripts/donnees/cultures.mjs` | Libelles des codes culture, lus dans `public/codebook*.js` |
+| `scripts/donnees/meteo.mjs` | Meteo Open-Meteo : maille, mesures, normales, cache, erreurs `METEO_INDISPONIBLE` |
 | `scripts/donnees/routes.mjs` | Routes HTTP GET, codes d'erreur |
-| `scripts/donnees/donnees.test.mjs` | Tests (35) |
+| `scripts/donnees/donnees.test.mjs` | Tests (36) |
+| `scripts/donnees/meteo.test.mjs` | Tests de la meteo (17) |
 
 Points techniques a connaitre :
 
@@ -125,10 +145,11 @@ Points techniques a connaitre :
 - `irrigable` et `type_sol` ne sont pas encore dans la fiche
 
 - pas de limite de taille totale du cache : il grossit avec les emprises consultees
-- pas encore de route `/api/v1/prix` (baremes publics) : prevue avec l'economie du jeu
 - le RPG est lu tel que publie : pas de fusion avec le parcellaire de l'utilisateur
 
 ## Suivi
 
 - 2026-11-09 : creation (relief, RPG, BD TOPO, parcellaire en lecture, cache disque)
 - 2026-11-10 : fiches parcelles (nom, surface, culture, bio, Telepac, historique 1 a 7 ans)
+- 2026-11-10 : meteo journaliere Open-Meteo par maille de 0,1 deg, avec normales 2015-2024
+- 2026-11-17 : retrait des references au jeu de gestion, devenu un projet separe

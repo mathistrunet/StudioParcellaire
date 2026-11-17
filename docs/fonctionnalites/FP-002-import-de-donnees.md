@@ -15,6 +15,7 @@ Importer rapidement un parcellaire existant dans Studio Parcellaire a partir de 
 - import `CSV parcellaire`
 - detection d'annee
 - affectation de colonnes de culture
+- repli des secondes cultures (interculture) sur leur parcelle principale
 - zoom automatique sur l'emprise importee
 
 ## Attendus fonctionnels
@@ -53,6 +54,32 @@ Lors de l'import d'un fichier XML Telepac, la culture est ecrite dans la colonne
 
 Cette distinction est necessaire car `ParcelleEditor` reconnait `code` et `code_culture` comme alias de la colonne N (`PROPERTY_ALIASES.culture`). Sans suppression pour offset ≠ 0, la culture s'afficherait en double (colonne cible ET colonne N).
 
+## Intercultures et « Parcelle secondaire » (Geofolia)
+
+L'« Export specifique (SHP) » de Geofolia ecrit une ligne par culture de la campagne.
+La seconde culture d'un champ arrive avec `TYPE_PARC = Parcelle secondaire` et
+exactement le meme contour que la parcelle principale. Constate le 2026-11-17 sur les
+exports reels de cinq exploitations : 30 lignes secondaires sur 239 pour la plus grosse,
+toutes confondues a 100 % avec une principale, aucune principale ne se chevauchant.
+Cultures secondaires rencontrees : « Ray-grass derobee » derriere un mais fourrage,
+« Prairie temporaire » et « Colza oleagineux d'hiver » derriere une orge de printemps.
+Importees telles quelles, ces lignes posaient une parcelle sur une autre.
+
+Regle (`src/domain/parcelles/intercultures.js`, `foldSecondaryParcels`, appelee par
+`normalizeImportedFeatures` pour tous les formats) :
+
+- est candidate une parcelle `Parcelle secondaire`, ou dont la culture N est une
+  interculture (libelle contenant derobee, CIPAN, CIVE, couvert, interculture, culture
+  intermediaire, engrais vert) ;
+- elle est repliee sur la parcelle non candidate dont le contour se confond avec le sien
+  (chacune couverte a 90 % au moins par l'autre) ; sa culture devient l'`interculture`
+  de cette parcelle et la ligne disparait ;
+- sans parcelle hote, elle reste une parcelle a part entiere (une derobee seule existe).
+
+Les champs Geofolia `CIP_CULTU` et `CIS_CULTU` (culture intermediaire principale et
+secondaire), vides dans les exports vus mais prevus par le format, sont lus comme
+interculture.
+
 ## Documentation utilisateur
 
 - utiliser `Importer fichier`
@@ -60,5 +87,7 @@ Cette distinction est necessaire car `ParcelleEditor` reconnait `code` et `code_
 - confirmer annee et colonne culture si demandees (XML uniquement)
 
 ## Limites / dette
+
+- l'interculture ne vaut que pour la campagne N : « Deplacer cultures » ne la decale pas
 
 ## Evolutions recommandees

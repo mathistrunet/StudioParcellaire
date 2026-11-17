@@ -8,6 +8,7 @@
  *   /api/v1/terrain    grille d'altitude (float32), couche mnt-lidar | mnh-lidar | rge-alti | srtm
  *   /api/v1/rpg        parcelles du RPG d'une année (GeoJSON)
  *   /api/v1/bdtopo     objets BD TOPO (GeoJSON), couche batiments | routes | surfaces-eau | cours-eau
+ *   /api/v1/meteo      météo journalière d'un point (Open-Meteo), complétée par les normales
  */
 import { prepareApiResponse } from "../http-security.mjs";
 import {
@@ -24,8 +25,9 @@ import {
 } from "./couches.mjs";
 import { HISTORIQUE_DEFAUT, HISTORIQUE_MAX } from "./fiche-parcelle.mjs";
 import { IgnIndisponible } from "./geoplateforme.mjs";
+import { MeteoIndisponible, lireDemandeMeteo } from "./meteo.mjs";
 
-export const ROUTES_DONNEES = ["/api/v1/parcelles", "/api/v1/terrain", "/api/v1/rpg", "/api/v1/bdtopo"];
+export const ROUTES_DONNEES = ["/api/v1/parcelles", "/api/v1/terrain", "/api/v1/rpg", "/api/v1/bdtopo", "/api/v1/meteo"];
 const ROUTE_FICHE = /^\/api\/v1\/parcelles\/([^/]+)$/;
 
 const envoyerJson = (res, status, contenu) => {
@@ -54,9 +56,16 @@ function optionsFiches(params) {
 /**
  * @param client       client GéoPlateforme (creerClientGeoplateforme)
  * @param parcelles    service des fiches parcelles (creerServiceParcelles)
+ * @param meteo        client météo (creerClientMeteo)
  * @returns (req, res, url) => Promise<boolean> : false si la route n'est pas la sienne
  */
-export function creerRoutesDonnees({ client, parcelles, signalerErreur = () => {} }) {
+export function creerRoutesDonnees({
+  client,
+  parcelles,
+  meteo,
+  signalerErreur = () => {},
+  aujourdhui = () => new Date().toISOString().slice(0, 10),
+}) {
   const routes = {
     async "/api/v1/parcelles"(params) {
       return { json: await parcelles.lister(optionsFiches(params)) };
@@ -77,6 +86,10 @@ export function creerRoutesDonnees({ client, parcelles, signalerErreur = () => {
       const typeName = lireCouche(params.get("couche"), COUCHES_BDTOPO);
       const emprise = lireEmprise(params.get("bbox"));
       return { json: await client.objets({ typeName, emprise, max: lireMax(params) }) };
+    },
+    async "/api/v1/meteo"(params) {
+      if (!meteo) throw new MeteoIndisponible("Service météo non configuré.");
+      return { json: await meteo.serie(lireDemandeMeteo(params, { aujourdhui: aujourdhui() })) };
     },
   };
 
@@ -108,7 +121,7 @@ export function creerRoutesDonnees({ client, parcelles, signalerErreur = () => {
         envoyerJson(res, 404, { error: error.message, code: "PARCELLE_INCONNUE" });
       } else if (error instanceof DonneesInvalides) {
         envoyerJson(res, 400, { error: error.message, code: error.code });
-      } else if (error instanceof IgnIndisponible) {
+      } else if (error instanceof IgnIndisponible || error instanceof MeteoIndisponible) {
         signalerErreur(error);
         envoyerJson(res, 502, { error: error.message, code: error.code });
       } else {

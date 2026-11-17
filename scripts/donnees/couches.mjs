@@ -25,6 +25,8 @@ export const COUCHES_BDTOPO = Object.freeze({
   routes: "BDTOPO_V3:troncon_de_route",
   "surfaces-eau": "BDTOPO_V3:surface_hydrographique",
   "cours-eau": "BDTOPO_V3:troncon_hydrographique",
+  // Haies linéaires (lignes), pour les haies de l'exploitation.
+  haies: "BDTOPO_V3:haie",
 });
 
 export const RPG_ANNEES = RPG_AVAILABLE_YEARS;
