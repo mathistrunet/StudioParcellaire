@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 import { parseParcellesCsvToFeatures, buildParcellesCsv } from "./parcellesCsv";
 import {
   EXEMPLE_CSV_TEXT,
@@ -313,5 +313,112 @@ A;Test;000;P1;1;Non;;BTH;MIS;;;;1.35,44.01 1.36,44.01 1.36,44.02 1.35,44.02 1.35
     expect(features[0].properties.cultureN_1).toBeTruthy();
     expect(features[0].properties.cultureN_2).toBeTruthy();
     expect(features[0].properties.cultureN).toBeUndefined();
+  });
+});
+
+describe("buildParcellesCsv — remplacement des cultures", () => {
+  const ASSOLIA_CSV = `"culture_id";"culture_name";"structure_id";"structure_name";"metacode"
+"1";"Blé tendre d'hiver";"4";"TestStruct";"BTH"
+"2";"Maïs ensilage";"4";"TestStruct";"MIE"
+"3";"Dérobée ray-grass";"4";"TestStruct";""
+"4";"Autre Assolé";"4";"TestStruct";""
+`;
+  const geometry = {
+    type: "Polygon",
+    coordinates: [[[1.35, 44.01], [1.36, 44.01], [1.36, 44.02], [1.35, 44.01]]],
+  };
+  const parcelle = (cultures) => ({ type: "Feature", properties: { nom: "P", ...cultures }, geometry });
+  const cellules = (csv, ligne = 1) => csv.split(/\r?\n/)[ligne].split(";").slice(8, 13);
+
+  // Le référentiel est mémorisé par le module : on repart d'un module neuf pour
+  // ne pas hériter de celui des tests précédents.
+  let buildParcellesCsv;
+  let describeExportCultures;
+  beforeEach(async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => ASSOLIA_CSV })));
+    vi.resetModules();
+    ({ buildParcellesCsv, describeExportCultures } = await import("./parcellesCsv"));
+  });
+
+  it("sans structure : remplace un libellé partout où il apparaît, vide = inchangé", async () => {
+    const csv = await buildParcellesCsv(
+      [
+        parcelle({ cultureN: "MAÏS FOURRAGE", cultureN_1: "MAÏS FOURRAGE" }),
+        parcelle({ cultureN: "PRAIRIE PERMANENTE" }),
+      ],
+      "", "", "",
+      { cultureReplacements: { "MAÏS FOURRAGE": "Maïs ensilage", "PRAIRIE PERMANENTE": "  " } }
+    );
+    expect(cellules(csv, 1).slice(0, 2)).toEqual(["Maïs ensilage", "Maïs ensilage"]);
+    expect(cellules(csv, 2)[0]).toBe("PRAIRIE PERMANENTE");
+  });
+
+  it("avec structure : rapproche un libellé Geofolia par son nom, sans code PAC", async () => {
+    const csv = await buildParcellesCsv(
+      [parcelle({ cultureN: "BLÉ TENDRE D'HIVER" })],
+      "", "", "",
+      { structureName: "TestStruct" }
+    );
+    expect(cellules(csv)[0]).toBe("Blé tendre d'hiver");
+  });
+
+  it("avec structure : la culture choisie dans la liste remplace « Autre assolé »", async () => {
+    const options = { structureName: "TestStruct" };
+    const sans = await buildParcellesCsv([parcelle({ cultureN: "MAÏS FOURRAGE" })], "", "", "", options);
+    expect(cellules(sans)[0]).toBe("Autre Assolé");
+    const avec = await buildParcellesCsv([parcelle({ cultureN: "MAÏS FOURRAGE" })], "", "", "", {
+      ...options,
+      cultureReplacements: { "MAÏS FOURRAGE": "Maïs ensilage" },
+    });
+    expect(cellules(avec)[0]).toBe("Maïs ensilage");
+  });
+
+  it("describeExportCultures liste les cultures, les non reconnues d'abord, avec la liste de la structure", async () => {
+    const { cultures, structureCultures } = await describeExportCultures(
+      [
+        parcelle({ cultureN: "MAÏS FOURRAGE", cultureN_1: "BLÉ TENDRE D'HIVER" }),
+        parcelle({ cultureN: "MAÏS FOURRAGE" }),
+      ],
+      "TestStruct"
+    );
+    expect(cultures.map((c) => [c.label, c.count, c.reconnue, c.auto])).toEqual([
+      ["MAÏS FOURRAGE", 2, false, "Autre Assolé"],
+      ["BLÉ TENDRE D'HIVER", 1, true, "Blé tendre d'hiver"],
+    ]);
+    expect(structureCultures).toEqual(["Autre Assolé", "Blé tendre d'hiver", "Dérobée ray-grass", "Maïs ensilage"]);
+  });
+
+  it("describeExportCultures sans structure : reconnue = code PAC connu", async () => {
+    const { cultures, structureCultures } = await describeExportCultures([parcelle({ cultureN: "MAÏS FOURRAGE" })]);
+    expect(cultures).toEqual([{ label: "MAÏS FOURRAGE", count: 1, code: "", auto: "MAÏS FOURRAGE", reconnue: false }]);
+    expect(structureCultures).toEqual([]);
+  });
+});
+
+describe("buildParcellesCsv — libellé importé rattaché au code PAC", () => {
+  const ASSOLIA_CSV = `"culture_id";"culture_name";"structure_id";"structure_name";"metacode"
+"1";"Blé tendre";"4";"TestStruct";"BTH"
+`;
+  const geometry = {
+    type: "Polygon",
+    coordinates: [[[1.35, 44.01], [1.36, 44.01], [1.36, 44.02], [1.35, 44.01]]],
+  };
+  let mod;
+  beforeEach(async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => ASSOLIA_CSV })));
+    window.CODEBOOK_EXTRA = { "BTH|1": "Blé tendre d’hiver - semences", BTH: "Blé tendre d’hiver" };
+    vi.resetModules();
+    mod = await import("./parcellesCsv");
+  });
+  afterEach(() => {
+    delete window.CODEBOOK_EXTRA;
+  });
+
+  it("« BLÉ TENDRE D'HIVER » (Geofolia) est reconnu comme BTH malgré casse et apostrophe", async () => {
+    const features = [{ type: "Feature", properties: { nom: "P", cultureN: "BLÉ TENDRE D'HIVER" }, geometry }];
+    const csv = await mod.buildParcellesCsv(features, "", "", "", { structureName: "TestStruct" });
+    expect(csv.split(/\r?\n/)[1].split(";")[8]).toBe("Blé tendre");
+    const { cultures } = await mod.describeExportCultures(features);
+    expect(cultures[0]).toMatchObject({ code: "BTH", reconnue: true });
   });
 });

@@ -21,6 +21,7 @@ import {
   readCultureValue,
   setCulture,
 } from "../domain/parcelles/cultureColumns";
+import { readInterculture, setInterculture } from "../domain/parcelles/intercultures";
 
 
 
@@ -260,10 +261,15 @@ const confidenceBadgeStyle = {
 
 const SOIL_COLUMN = { id: "type_sol", label: "Type de sol", width: 160 };
 
+// Culture intermédiaire de la campagne N (dérobée, CIPAN…), sur la même parcelle
+// que la culture N : voir domain/parcelles/intercultures.js.
+const INTERCULTURE_COLUMN = { id: "interculture", label: "Interculture N", width: 170 };
+
 /** Toutes les colonnes proposées au filtre, dans l'ordre d'affichage. */
 const ALL_COLUMNS = [
   ...FIXED_COLUMNS,
   ...CULTURE_COLUMNS.map((col) => ({ id: col.id, label: col.label, width: 150 })),
+  INTERCULTURE_COLUMN,
   SOIL_COLUMN,
   ...ADVANCED_COLUMNS.map((col) => ({ id: col.id, label: col.label, width: 150 })),
 ];
@@ -281,6 +287,8 @@ const HIDDEN_COLUMNS_KEY = "studioparcellaire.colonnes-masquees";
 const COLUMN_HINTS = {
   bio: "Conduite en agriculture biologique",
   irrigable: "Parcelle irrigable — colonne « Irrigabilité » du CSV Assolia",
+  interculture:
+    "Dérobée ou culture intermédiaire de la campagne N, sur la même parcelle que la culture N. Exportée en CIP_CULTU dans le shapefile ; absente du format CSV Assolia.",
   prev5: "Conservée dans l'outil, non exportée vers le CSV Assolia",
   prev6: "Conservée dans l'outil, non exportée vers le CSV Assolia",
 };
@@ -405,6 +413,21 @@ const TableRow = React.memo(function TableRow({
           />
         </td>
       ))}
+      {affiche("interculture") && (
+        <td style={cellStyle}>
+          <input
+            list="cultures-col-current"
+            value={props.interculture ?? readInterculture(props)}
+            placeholder="—"
+            onChange={(e) => {
+              const val = e.target.value;
+              onUpdateField(idKey, (p) => setInterculture(p, val));
+            }}
+            onClick={(e) => e.stopPropagation()}
+            style={inputStyle}
+          />
+        </td>
+      )}
       {affiche("type_sol") && (
         <td style={cellStyle}>
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>

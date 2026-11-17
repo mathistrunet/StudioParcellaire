@@ -7,8 +7,15 @@ import { useEffect, useMemo, useState } from "react";
 
 import Modal from "../components/Modal";
 import { buildTelepacXML } from "../services/telepacXml";
-import { buildParcellesCsv, loadAssoliaStructureNames } from "../services/parcellesCsv";
+import {
+  buildParcellesCsv,
+  describeExportCultures,
+  loadAssoliaStructureNames,
+} from "../services/parcellesCsv";
 import { buildParcelShapefileZip } from "../services/parcelleShapefile";
+
+// Valeur par défaut stable : un tableau neuf à chaque rendu relancerait les effets.
+const AUCUNE_PARCELLE = [];
 
 const iconStyle = { width: 17, height: 17, display: "inline-block", verticalAlign: "-3px" };
 const IconDownload = () => (
@@ -70,7 +77,8 @@ const EXPORT_CHOICES = [
     title: "CSV Assolia",
     description:
       "Nom, surface, conduite AB, irrigabilité, type de sol, cultures N à N-4 et contour.",
-    limites: "N+1, N-5 et N-6 ne font pas partie du format Assolia et ne sont pas exportés.",
+    limites:
+      "N+1, N-5, N-6 et l'interculture ne font pas partie du format Assolia et ne sont pas exportés.",
   },
   {
     id: "xml",
@@ -82,9 +90,8 @@ const EXPORT_CHOICES = [
     id: "shp",
     title: "Shapefile (.zip)",
     description:
-      "Contours en Lambert-93 pour un SIG, avec exploitation, campagne, nom, surface et type de sol.",
-    limites:
-      "Le format DBF n'emporte que les cultures N et N-1 ; conduite AB et irrigabilité n'y figurent pas.",
+      "Contours en Lambert-93 au format de l'export Geofolia : exploitation, campagne, nom, surface, cultures N, N-1, N-2, interculture et type de sol.",
+    limites: "Conduite AB et irrigabilité n'y figurent pas.",
   },
 ];
 
@@ -145,6 +152,9 @@ function CsvModal({
   missingSoilCount = 0,
   missingSoilFill = "",
   onMissingSoilFillChange,
+  features = AUCUNE_PARCELLE,
+  cultureReplacements = {},
+  onCultureReplacementChange,
 }) {
   // Structures cibles proposées par l'export Assolia. La liste est chargée à
   // l'ouverture ; en cas d'échec on garde le champ utilisable en saisie libre
@@ -187,6 +197,36 @@ function CsvModal({
     if (!courante || structureNames.includes(courante)) return structureNames;
     return [courante, ...structureNames];
   }, [structureNames, values.structureName]);
+
+  // Cultures de l'export et, avec une structure cible, la culture de la structure
+  // retenue automatiquement pour chacune. Recalculé à chaque changement de structure.
+  const structureCible = String(values.structureName || "").trim();
+  const [culturesExport, setCulturesExport] = useState({ cultures: [], structureCultures: [] });
+  const [culturesErreur, setCulturesErreur] = useState("");
+  useEffect(() => {
+    let annule = false;
+    describeExportCultures(features, structureCible)
+      .then((resultat) => {
+        if (annule) return;
+        setCulturesExport(resultat);
+        setCulturesErreur("");
+      })
+      .catch((error) => {
+        if (annule) return;
+        console.warn("[CSV_CULTURES]", error);
+        setCulturesErreur(error?.message || "Correspondance des cultures indisponible.");
+        setCulturesExport({ cultures: [], structureCultures: [] });
+      });
+    return () => {
+      annule = true;
+    };
+  }, [features, structureCible]);
+
+  const { cultures, structureCultures } = culturesExport;
+  const avecListe = structureCible && structureCultures.length > 0;
+  const nonReconnues = cultures.filter(
+    (culture) => !culture.reconnue && !String(cultureReplacements[culture.label] ?? "").trim()
+  ).length;
 
   return (
     <Modal
@@ -289,6 +329,96 @@ function CsvModal({
             )}
           </span>
         </label>
+
+        {cultures.length > 0 && (
+          <details key={structureCible || "sans-structure"} open={nonReconnues > 0 || undefined}>
+            <summary style={{ cursor: "pointer", fontSize: "var(--fs-md)", fontWeight: 600 }}>
+              Remplacer les cultures ({cultures.length})
+              {nonReconnues > 0 ? (
+                <span style={{ color: "var(--c-warn, #b45309)", fontWeight: 400 }}>
+                  {" "}
+                  — {nonReconnues} non reconnue{nonReconnues > 1 ? "s" : ""}
+                </span>
+              ) : null}
+            </summary>
+            <div
+              style={{
+                maxHeight: 260,
+                overflowY: "auto",
+                border: "1px solid var(--c-border)",
+                borderRadius: "var(--r-md)",
+                marginTop: 8,
+              }}
+            >
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "var(--fs-md)", tableLayout: "fixed" }}>
+                <thead>
+                  <tr>
+                    <th style={soilThStyle}>Culture du parcellaire</th>
+                    <th style={soilThStyle}>{avecListe ? `Culture ${structureCible}` : "Exporter comme"}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cultures.map((culture) => {
+                    const choix = cultureReplacements[culture.label] ?? "";
+                    const aRevoir = !culture.reconnue && !String(choix).trim();
+                    return (
+                      <tr key={culture.label}>
+                        <td
+                          style={{
+                            ...soilTdStyle,
+                            borderLeft: aRevoir ? "3px solid var(--c-warn, #b45309)" : "3px solid transparent",
+                          }}
+                        >
+                          <div>{culture.label}</div>
+                          <div className="fp-hint" style={{ fontWeight: 400 }}>
+                            {culture.code ? `Code PAC ${culture.code}` : "Sans code PAC"}
+                            {` · ${culture.count} case${culture.count > 1 ? "s" : ""}`}
+                          </div>
+                        </td>
+                        <td style={soilTdStyle}>
+                          {avecListe ? (
+                            <select
+                              value={choix}
+                              onChange={(event) => onCultureReplacementChange(culture.label, event.target.value)}
+                              style={{ ...inputStyle, width: "100%", boxSizing: "border-box" }}
+                            >
+                              <option value="">
+                                {culture.reconnue ? `Auto : ${culture.auto}` : `Non reconnue : ${culture.auto}`}
+                              </option>
+                              {structureCultures.map((nom) => (
+                                <option key={nom} value={nom}>
+                                  {nom}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={choix}
+                              placeholder={culture.label}
+                              onChange={(event) => onCultureReplacementChange(culture.label, event.target.value)}
+                              style={{ ...inputStyle, width: "100%", boxSizing: "border-box" }}
+                            />
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="fp-hint" style={{ marginTop: 6 }}>
+              {avecListe
+                ? "Les cultures sont rapprochées par leur nom puis par leur code PAC. Une culture non reconnue sort en « Autre assolé » tant qu'aucune culture de la structure n'est choisie."
+                : "Un champ laissé vide conserve le libellé d'origine."}
+            </p>
+          </details>
+        )}
+        {culturesErreur ? (
+          <p className="fp-hint" style={{ color: "var(--c-warn, #b45309)" }}>
+            Cultures de la structure indisponibles : {culturesErreur}
+          </p>
+        ) : null}
 
         {missingSoilCount > 0 && (
           <label style={labelStyle}>
@@ -427,7 +557,7 @@ function ShapefileModal({ values, onChange, onCancel, onConfirm, disabled }) {
       open
       width={460}
       title="Export shapefile"
-      subtitle="Une archive .zip contenant .shp, .dbf, .shx et .prj est générée."
+      subtitle="Une archive .zip contenant .shp, .shx, .dbf, .prj et .cpg, au format de l'export Geofolia."
       onClose={onCancel}
       footer={
         <>
@@ -482,7 +612,7 @@ function ShapefileModal({ values, onChange, onCancel, onConfirm, disabled }) {
 }
 
 export default function ExportMenuButton({
-  features = [],
+  features = AUCUNE_PARCELLE,
   setFeatures,
   disabled = false,
   variant = "default",
@@ -543,6 +673,12 @@ export default function ExportMenuButton({
     []
   );
 
+  // Remplacements de cultures, par libellé : ils valent pour une structure cible
+  // donnée, et sont donc oubliés quand la structure change.
+  const [cultureReplacements, setCultureReplacements] = useState({});
+  const handleCultureReplacementChange = (label, value) =>
+    setCultureReplacements((prev) => ({ ...prev, [label]: value }));
+
   const [internalCsvValues, setInternalCsvValues] = useState({
     secteur: "TEST",
     exploitation: "Exploitation 1",
@@ -550,7 +686,13 @@ export default function ExportMenuButton({
     structureName: "",
   });
   const csvValues = csvValuesProp ?? internalCsvValues;
-  const setCsvValues = onCsvValuesChange ?? setInternalCsvValues;
+  const setCsvValuesRaw = onCsvValuesChange ?? setInternalCsvValues;
+  const setCsvValues = (next) => {
+    if (String(next?.structureName || "") !== String(csvValues.structureName || "")) {
+      setCultureReplacements({});
+    }
+    setCsvValuesRaw(next);
+  };
 
   const [shapefileValues, setShapefileValues] = useState({
     raisSoc: "",
@@ -617,7 +759,7 @@ export default function ExportMenuButton({
         csvValues.secteur,
         csvValues.exploitation,
         csvValues.codeExploitation,
-        { structureName: csvValues.structureName }
+        { structureName: csvValues.structureName, cultureReplacements }
       );
       downloadBlob(
         new Blob([csv], { type: "text/csv;charset=utf-8" }),
@@ -690,6 +832,9 @@ export default function ExportMenuButton({
           missingSoilCount={missingSoilCount}
           missingSoilFill={missingSoilFill}
           onMissingSoilFillChange={setMissingSoilFill}
+          features={features}
+          cultureReplacements={cultureReplacements}
+          onCultureReplacementChange={handleCultureReplacementChange}
         />
       )}
 

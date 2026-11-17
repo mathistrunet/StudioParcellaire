@@ -13,6 +13,7 @@ import JSZip from "jszip";
 import { routeShapefileBufferToFeatures } from "./romaniaShapefileZip";
 import { parseParcellesCsvToFeatures } from "./parcellesCsv";
 import { parseGeoPackageBuffer } from "../utils/geopackage";
+import { foldSecondaryParcels } from "../domain/parcelles/intercultures";
 
 export const FORMAT_TELEPAC_XML = "telepac-xml";
 export const FORMAT_SHAPEFILE_ZIP = "shapefile-zip";
@@ -242,11 +243,15 @@ export function yearFromFilename(name) {
  * quand elle est déductible du nom de fichier. Les géométries non surfaciques
  * (points de repère, lignes) sont ignorées silencieusement : elles ne
  * constituent pas des parcelles.
+ *
+ * Une seconde culture exportée comme une parcelle à part (« Parcelle secondaire »
+ * de Geofolia, dérobée) est repliée sur sa parcelle principale, dont elle devient
+ * l'interculture : sinon deux parcelles se superposent.
  */
 export function normalizeImportedFeatures(features, { sourceName = "", year = null } = {}) {
   const resolvedYear = year ?? yearFromFilename(sourceName);
-  return (features || [])
-    .filter((feature) => POLYGON_TYPES.has(feature?.geometry?.type))
+  const polygons = (features || []).filter((feature) => POLYGON_TYPES.has(feature?.geometry?.type));
+  return foldSecondaryParcels(polygons).features
     .map((feature) => {
       const properties = { ...(feature.properties || {}) };
       if (resolvedYear != null && properties.annee == null) {

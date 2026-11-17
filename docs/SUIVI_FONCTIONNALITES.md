@@ -25,16 +25,17 @@ Priorites recommandees :
 | ID | Fonctionnalite | Statut | Priorite | Commentaire | Fiche |
 | --- | --- | --- | --- | --- | --- |
 | FP-001 | Gestion du parcellaire | Implante | P1 | Coeur de l'application, edition et persistance presentes | [FP-001](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-001-gestion-du-parcellaire.md) |
-| FP-002 | Import de donnees | Implante | P1 | Import XML Telepac, ZIP shapefile et CSV parcellaire | [FP-002](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-002-import-de-donnees.md) |
+| FP-002 | Import de donnees | Implante | P1 | Import XML Telepac, ZIP shapefile et CSV parcellaire ; secondes cultures Geofolia repliees en interculture | [FP-002](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-002-import-de-donnees.md) |
 | FP-003 | Edition des proprietes et cultures | Implante | P1 | Edition riche, cultures jusqu'a N-6 et N+1 | [FP-003](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-003-edition-des-proprietes-et-cultures.md) |
 | FP-004 | Visualisation Viewer | Implante | P1 | Consultation filtree par annee et culture | [FP-004](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-004-visualisation-viewer.md) |
-| FP-005 | Export des donnees | Partiel | P1 | XML et CSV exposes, shapefile a clarifier | [FP-005](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-005-export-des-donnees.md) |
+| FP-005 | Export des donnees | Implante | P1 | CSV (remplacement des cultures, structure cible), XML, shapefile au format Geofolia | [FP-005](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-005-export-des-donnees.md) |
 | FP-006 | Rapprochement inter-annees | Implante | P1 | Interface, fusion et propagation culture (cultureN1) corrigees et testees | [FP-006](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-006-rapprochement-inter-annees.md) |
 | FP-007 | Couches cartographiques et donnees externes | Implante | P2 | Fonds, RPG, sols, toponymie | [FP-007](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-007-couches-cartographiques-et-donnees-externes.md) |
 | FP-008 | Consultation SoilGrids par parcelle | Implante | P2 | Viewer + cache + resume + profil | [FP-008](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-008-consultation-soilgrids-par-parcelle.md) |
 | FP-009 | Mapping des types de sols | Implante | P2 | Mapping par structure sauvegarde en backend | [FP-009](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-009-mapping-des-types-de-sols.md) |
 | FP-010 | Nommage automatique par toponymie | Implante | P2 | Automatisation disponible, a consolider metierement | [FP-010](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-010-nommage-automatique-par-toponymie.md) |
 | FP-011 | Backend local et API internes | Implante | P1 | Persistance et services d'acces locaux | [FP-011](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-011-backend-local-et-api-internes.md) |
+| FP-012 | API v1 : fiches parcelles et donnees publiques | Implante | P2 | Fiches parcelles avec historique, relief, RPG, BD TOPO, cache disque | [FP-012](C:/Users/Mathis%20Trunet/Documents/GitHub/StudioParcellaire/docs/fonctionnalites/FP-012-api-v1-donnees-publiques.md) |
 
 ## 3. Points transverses a suivre
 

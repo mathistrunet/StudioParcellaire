@@ -2,83 +2,38 @@ import { ringAreaM2 } from "../utils/geometry";
 import { toLambert93 } from "../utils/proj";
 import { createShapefileZip } from "./shapefileWriter";
 import { labelFromCode } from "../utils/cultureLabels";
+import { getCultureColumn, readCultureValue } from "../domain/parcelles/cultureColumns";
+import { readInterculture } from "../domain/parcelles/intercultures";
 
+// Les parcelles exportées sont toutes principales : une interculture n'est pas une
+// parcelle de plus mais une valeur de la parcelle (CIP_CULTU, comme chez Geofolia).
 const TYPE_PARCELLE_LABEL = "Parcelle principale";
 
-const MAX_CHAR_FIELD_SIZE = 254;
-
+// Noms, types et tailles repris de l'« Export spécifique (SHP) » de Geofolia, relu
+// par Assolia. Les libellés de culture gardent plus de place (100 au lieu de 25) :
+// un libellé tronqué ne se rattache plus à rien.
 const PARCEL_FIELD_SCHEMA = [
-  { name: "CODE_EXPLO", type: "C", size: MAX_CHAR_FIELD_SIZE },
-  { name: "RAIS_SOCIA", type: "C", size: MAX_CHAR_FIELD_SIZE },
-  { name: "CAMPAGNE", type: "N", size: 9, decimal: 0 },
-  { name: "GUID_PARC", type: "C", size: MAX_CHAR_FIELD_SIZE },
-  { name: "TYPE_PARC", type: "C", size: MAX_CHAR_FIELD_SIZE },
-  { name: "NOM_PARCEL", type: "C", size: MAX_CHAR_FIELD_SIZE },
-  { name: "SURFACE", type: "N", size: 18, decimal: 4 },
-  { name: "CP_CULTU", type: "C", size: MAX_CHAR_FIELD_SIZE },
-  { name: "CULT_PREC", type: "C", size: MAX_CHAR_FIELD_SIZE },
-  { name: "TYPE_SOL", type: "C", size: MAX_CHAR_FIELD_SIZE },
+  { name: "CODE_EXPLO", type: "C", size: 20 },
+  { name: "RAIS_SOCIA", type: "C", size: 50 },
+  { name: "CAMPAGNE", type: "N", size: 4, decimal: 0 },
+  { name: "GUID_PARC", type: "C", size: 36 },
+  { name: "TYPE_PARC", type: "C", size: 30 },
+  { name: "NOM_PARCEL", type: "C", size: 253 },
+  { name: "SURFACE", type: "N", size: 17, decimal: 7 },
+  { name: "CP_CULTU", type: "C", size: 100 },
+  { name: "CULT_PREC", type: "C", size: 100 },
+  { name: "CULT_PREC2", type: "C", size: 100 },
+  { name: "CIP_CULTU", type: "C", size: 100 },
+  { name: "TYPE_SOL", type: "C", size: 75 },
 ];
 
 const CULTURE_LABEL_KEYS = [
   "LIB_CULTURE",
   "LIB_CULTU",
   "NOM_CULTURE",
-  "CULTURE",
-  "culture",
   "LIBELLE_CULTURE",
   "CP_CULTU_LIB",
 ];
-const CULTURE_CODE_KEYS = ["CP_CULTU", "code", "CODE", "code_culture", "CODE_CULTURE", "CODE_CULTU"];
-const CULTURE_PREV2_LABEL_KEYS = ["CULT_PREC2_LIB", "CULT_PREC_LABEL", "CULT_PREC2_LABEL"];
-const CULTURE_PREV2_CODE_KEYS = ["CULT_PREC2", "culture_prec2"];
-
-const CP1252_OVERRIDES = new Map([
-  [0x20ac, 0x80], // €
-  [0x201a, 0x82], // ‚
-  [0x0192, 0x83], // ƒ
-  [0x201e, 0x84], // „
-  [0x2026, 0x85], // …
-  [0x2020, 0x86], // †
-  [0x2021, 0x87], // ‡
-  [0x02c6, 0x88], // ˆ
-  [0x2030, 0x89], // ‰
-  [0x0160, 0x8a], // Š
-  [0x2039, 0x8b], // ‹
-  [0x0152, 0x8c], // Œ
-  [0x017d, 0x8e], // Ž
-  [0x2018, 0x91], // ‘
-  [0x2019, 0x92], // ’
-  [0x201c, 0x93], // “
-  [0x201d, 0x94], // ”
-  [0x2022, 0x95], // •
-  [0x2013, 0x96], // –
-  [0x2014, 0x97], // —
-  [0x02dc, 0x98], // ˜
-  [0x2122, 0x99], // ™
-  [0x0161, 0x9a], // š
-  [0x203a, 0x9b], // ›
-  [0x0153, 0x9c], // œ
-  [0x017e, 0x9e], // ž
-  [0x0178, 0x9f], // Ÿ
-]);
-
-function toCp1252String(input) {
-  if (input == null) return "";
-  const normalized = String(input).replace(/\u00A0/g, " ");
-  let out = "";
-  for (const char of normalized) {
-    const codePoint = char.codePointAt(0);
-    if (codePoint <= 0xff) {
-      out += String.fromCharCode(codePoint);
-    } else if (CP1252_OVERRIDES.has(codePoint)) {
-      out += String.fromCharCode(CP1252_OVERRIDES.get(codePoint));
-    } else {
-      out += "?";
-    }
-  }
-  return out;
-}
 
 function randomCodeExploit() {
   return String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0");
@@ -106,18 +61,19 @@ function pickFirstValue(props, keys) {
   return "";
 }
 
-function resolveCultureLabel(props, labelKeys, codeKeys) {
-  const direct = pickFirstValue(props, labelKeys);
-  if (direct) return direct;
-  for (const key of codeKeys) {
-    const value = props[key];
-    if (value == null) continue;
-    const trimmed = String(value).trim();
-    if (!trimmed) continue;
-    const fromCode = labelFromCode(trimmed.toUpperCase());
-    return fromCode || trimmed;
+/** Libellé d'une culture : le libellé du codebook pour un code PAC, sinon la valeur telle quelle. */
+function cultureLabel(raw) {
+  const value = raw == null ? "" : String(raw).trim();
+  if (!value) return "";
+  return labelFromCode(value.toUpperCase()) || value;
+}
+
+function resolveCultureLabel(props, columnId) {
+  if (columnId === "current") {
+    const direct = pickFirstValue(props, CULTURE_LABEL_KEYS);
+    if (direct) return direct;
   }
-  return "";
+  return cultureLabel(readCultureValue(props, getCultureColumn(columnId)));
 }
 
 function computeSurfaceHa(feature) {
@@ -167,8 +123,6 @@ function normalizeParcelFeature(feature, meta, index) {
   const name = pickFirstValue(props, ["NOM_PARCEL", "nom_parcelle", "nom_affiche", "nom"])
     || `Parcelle ${index + 1}`;
   const typeSol = pickFirstValue(props, ["TYPE_SOL", "type_sol"]);
-  const cultureLabel = resolveCultureLabel(props, CULTURE_LABEL_KEYS, CULTURE_CODE_KEYS);
-  const prev2Label = resolveCultureLabel(props, CULTURE_PREV2_LABEL_KEYS, CULTURE_PREV2_CODE_KEYS);
   const surfaceHa = computeSurfaceHa(feature);
 
   const campagneInt = Number.isFinite(meta.campagneInt)
@@ -178,17 +132,21 @@ function normalizeParcelFeature(feature, meta, index) {
     ? Math.trunc(campagneInt)
     : new Date().getFullYear();
 
+  // Le texte est encodé en Windows-1252 par l'écrivain du .dbf.
   const shapeProps = {
-    CODE_EXPLO: toCp1252String(meta.codeExploit),
-    RAIS_SOCIA: toCp1252String(meta.raisSoc),
+    CODE_EXPLO: meta.codeExploit,
+    RAIS_SOCIA: meta.raisSoc,
     CAMPAGNE: campagneValue,
-    GUID_PARC: toCp1252String(guid),
-    TYPE_PARC: toCp1252String(TYPE_PARCELLE_LABEL),
-    NOM_PARCEL: toCp1252String(name),
-    SURFACE: Number(surfaceHa.toFixed(4)),
-    CP_CULTU: toCp1252String(cultureLabel),
-    CULT_PREC: toCp1252String(prev2Label),
-    TYPE_SOL: toCp1252String(typeSol),
+    GUID_PARC: guid,
+    TYPE_PARC: TYPE_PARCELLE_LABEL,
+    NOM_PARCEL: name,
+    SURFACE: surfaceHa,
+    CP_CULTU: resolveCultureLabel(props, "current"),
+    // CULT_PREC portait la culture N-2 : c'est le précédent, donc N-1.
+    CULT_PREC: resolveCultureLabel(props, "prev1"),
+    CULT_PREC2: resolveCultureLabel(props, "prev2"),
+    CIP_CULTU: cultureLabel(readInterculture(props)),
+    TYPE_SOL: typeSol,
   };
 
   return {
@@ -242,16 +200,16 @@ export async function buildParcelShapefileZip(features, { raisSoc, campagne, cod
   if (!Array.isArray(features) || features.length === 0) {
     throw new Error("NO_PARCELS");
   }
-  const rais = toCp1252String((raisSoc ?? "").trim().toUpperCase());
+  const rais = (raisSoc ?? "").trim().toUpperCase();
   if (!rais) {
     throw new Error("RAIS_SOCIA_REQUIRED");
   }
   const currentYear = new Date().getFullYear().toString();
   const campagneInput = (campagne ?? currentYear).toString().trim() || currentYear;
-  const campagneValue = toCp1252String(campagneInput);
+  const campagneValue = campagneInput;
   const campagneInt = Number.parseInt(campagneInput, 10);
 
-  const codeValue = toCp1252String(ensureCodeExploit(features, codeExploit));
+  const codeValue = ensureCodeExploit(features, codeExploit);
 
   const normalized = [];
   const shapefileFeatures = [];

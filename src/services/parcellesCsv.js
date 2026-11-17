@@ -165,12 +165,59 @@ async function loadAssoliaCulturesExport() {
   return assoliaCulturesPromise;
 }
 
+const AUTRE_ASSOLE = "Autre assolé";
+
+/**
+ * Nom de culture comparable d'une source à l'autre : sans casse, accent ni
+ * ponctuation. « RAY-GRASS DÉROBÉE » (Geofolia) et « Ray-grass dérobée » se valent.
+ */
+function normalizeCultureName(raw) {
+  return String(raw || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/œ/g, "oe")
+    .replace(/[^a-z0-9>]+/g, " ")
+    .trim();
+}
+
+// Index « libellé normalisé → code PAC » du codebook, refait seulement si le
+// codebook chargé change. Il rattache un libellé saisi ou importé (« BLÉ TENDRE
+// D'HIVER » de Geofolia) au libellé officiel (« Blé tendre d’hiver ») malgré la
+// casse, les accents et l'apostrophe typographique.
+let pacNameIndexCache = { source: undefined, index: new Map() };
+function pacNameIndex() {
+  const source = typeof window !== "undefined" ? window.CODEBOOK_EXTRA : null;
+  if (pacNameIndexCache.source !== source) {
+    // Tout le codebook, codes sans précision d'abord : entriesCodebook() écarte le
+    // code nu (« BTH ») dès qu'il a des précisions, or c'est son libellé qu'on cherche.
+    const entries = Object.entries(source && typeof source === "object" ? source : {})
+      .map(([key, label]) => [String(key).trim().toUpperCase(), String(label)])
+      .sort(([x], [y]) => Number(x.includes("|")) - Number(y.includes("|")));
+    const index = new Map();
+    for (const [key, label] of entries) {
+      const name = normalizeCultureName(label);
+      if (name && !index.has(name)) index.set(name, key);
+    }
+    pacNameIndexCache = { source, index };
+  }
+  return pacNameIndexCache.index;
+}
+
+/** Code PAC (et précision) d'un libellé, par comparaison normalisée ; `null` sinon. */
+function pacKeyFromName(raw) {
+  const key = codeFromLabel(String(raw || "").trim()) || pacNameIndex().get(normalizeCultureName(raw));
+  return key ? splitCultureKey(key) : null;
+}
+
 async function getStructureCultureLookup(structureName) {
   const normalizedStructure = normalizeStructureName(structureName);
   if (!normalizedStructure) return null;
   const entries = await loadAssoliaCulturesExport();
   const byMetacode = {};
   const byCultureName = {};
+  const byName = {};
+  const names = [];
   let fallbackName = "";
   entries.forEach((entry) => {
     const structure = normalizeStructureName(entry.structure_name);
@@ -182,16 +229,51 @@ async function getStructureCultureLookup(structureName) {
     if (metacode && normalizedName && !byCultureName[normalizedName]) {
       byCultureName[normalizedName] = metacode;
     }
+    const comparable = normalizeCultureName(name);
+    if (comparable && !byName[comparable]) {
+      byName[comparable] = name;
+      names.push(name);
+    }
     if (metacode) {
       byMetacode[metacode] = name;
-    } else if (!fallbackName) {
+    } else if (!fallbackName && comparable === "autre assole") {
       fallbackName = name;
     }
   });
-  if (!Object.keys(byMetacode).length && !Object.keys(byCultureName).length && !fallbackName) {
-    return null;
+  if (!names.length) return null;
+  names.sort((x, y) => x.localeCompare(y, "fr"));
+  return { byMetacode, byCultureName, byName, names, fallbackName: fallbackName || AUTRE_ASSOLE };
+}
+
+/**
+ * Culture de la structure cible pour une valeur du parcellaire.
+ *
+ * Dans l'ordre : le nom exact d'une culture de la structure (un libellé Geofolia
+ * comme « Blé tendre d'hiver » n'a pas de code PAC mais existe souvent tel quel),
+ * puis le code PAC avec sa précision (blé bio ≠ blé standard), puis le code seul.
+ * Sans correspondance : « Autre assolé ». Une case vide reste vide.
+ */
+function resolveStructureCulture(lookup, raw, precision = "") {
+  const value = raw == null ? "" : String(raw).trim();
+  if (!value) return { value: "", matched: true };
+  const label = labelFromCode(value.toUpperCase()) || value;
+  const byName = lookup.byName[normalizeCultureName(label)] || lookup.byName[normalizeCultureName(value)];
+  if (byName) return { value: byName, matched: true };
+  const fromName = pacKeyFromName(value);
+  const candidates = [
+    { code: getMetacodeFromValue(value), precision },
+    fromName ? { code: fromName.code, precision: precision || fromName.precision } : null,
+  ];
+  for (const candidate of candidates) {
+    const metacode = candidate?.code;
+    if (!metacode) continue;
+    const precisionTrimmed = String(candidate.precision || "").trim();
+    if (precisionTrimmed && lookup.byMetacode[`${metacode}|${precisionTrimmed}`]) {
+      return { value: lookup.byMetacode[`${metacode}|${precisionTrimmed}`], matched: true };
+    }
+    if (lookup.byMetacode[metacode]) return { value: lookup.byMetacode[metacode], matched: true };
   }
-  return { byMetacode, byCultureName, fallbackName };
+  return { value: lookup.fallbackName, matched: false };
 }
 
 function buildCultureProps(cultureValues, offset) {
@@ -410,6 +492,73 @@ function getPrecisionByYearIndex(props, yearIndex) {
   return "";
 }
 
+/** Libellé affiché d'une culture : celui du codebook pour un code PAC, sinon la valeur. */
+function cultureDisplayLabel(raw) {
+  const value = raw == null ? "" : String(raw).trim();
+  if (!value) return "";
+  return labelFromCode(value.toUpperCase()) || value;
+}
+
+/** Cultures N à N-4 telles que l'export les lit, avec leur précision. */
+function exportCultureEntries(props) {
+  const current = readCultureValue(props, getCultureColumn("current"));
+  return [current, ...CULTURE_PREV_KEYS.map((keys) => firstNonEmptyProp(props, keys))].map(
+    (raw, index) => ({
+      value: raw == null ? "" : String(raw).trim(),
+      precision: getPrecisionByYearIndex(props, index),
+    })
+  );
+}
+
+/** Code PAC reconnu par le codebook, `""` sinon (un libellé libre n'en a pas). */
+function getPacCode(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  const fromName = pacKeyFromName(value);
+  if (fromName) return fromName.code;
+  const { code } = splitCultureKey(value);
+  return labelFromCode(code) ? code : "";
+}
+
+/**
+ * Cultures distinctes d'un export, pour la table de remplacement de la boîte
+ * d'export : libellé, nombre de cases concernées, code PAC reconnu et, quand une
+ * structure cible est donnée, la culture de la structure choisie automatiquement.
+ *
+ * Les cultures non reconnues viennent en premier : ce sont elles qui sortiraient
+ * en « Autre assolé » (avec structure) ou sous un libellé libre (sans structure).
+ *
+ * @returns {Promise<{ cultures: Array<{label, count, code, auto, reconnue}>, structureCultures: string[] }>}
+ */
+export async function describeExportCultures(features, structureName = "") {
+  const lookup = structureName ? await getStructureCultureLookup(structureName) : null;
+  const byLabel = new Map();
+  (features || []).forEach((feature) => {
+    exportCultureEntries(feature?.properties || {}).forEach(({ value, precision }) => {
+      if (!value) return;
+      const label = cultureDisplayLabel(value);
+      let entry = byLabel.get(label);
+      if (!entry) {
+        const code = getPacCode(value);
+        const resolved = lookup ? resolveStructureCulture(lookup, value, precision) : null;
+        entry = {
+          label,
+          count: 0,
+          code,
+          auto: resolved ? resolved.value : label,
+          reconnue: resolved ? resolved.matched : Boolean(code),
+        };
+        byLabel.set(label, entry);
+      }
+      entry.count += 1;
+    });
+  });
+  const cultures = [...byLabel.values()].sort(
+    (a, b) => Number(a.reconnue) - Number(b.reconnue) || a.label.localeCompare(b.label, "fr")
+  );
+  return { cultures, structureCultures: lookup ? lookup.names : [] };
+}
+
 export async function buildParcellesCsv(
   features,
   secteur,
@@ -426,27 +575,15 @@ export async function buildParcellesCsv(
     }
   }
 
-  // Résout un code culture vers le libellé Assolia lorsqu'une structure est définie.
-  // Essaie d'abord la clé complète CODE|precision pour correspondre à la bonne
-  // culture Assolia (ex. blé bio ≠ blé standard), puis replie sur le code seul.
-  // Si aucune correspondance n'existe dans la structure, on émet « Autre assolé »
-  // (une case vide reste vide : pas de culture pour cette année).
-  const resolveCulture = (raw, metacodeOverride = "", precision = "") => {
-    const value = raw == null ? "" : String(raw).trim();
-    if (!value && !metacodeOverride) return "";
-    const metacode = metacodeOverride || getMetacodeFromValue(value);
-    if (metacode && structureLookup?.byMetacode) {
-      // Tentative avec précision (ex. "BLE|1" pour blé semence)
-      const precisionTrimmed = String(precision || "").trim();
-      if (precisionTrimmed) {
-        const fullKey = `${metacode}|${precisionTrimmed}`;
-        if (structureLookup.byMetacode[fullKey]) return structureLookup.byMetacode[fullKey];
-      }
-      // Repli sur le code seul
-      if (structureLookup.byMetacode[metacode]) return structureLookup.byMetacode[metacode];
-    }
-    // Structure définie mais aucune correspondance trouvée → « Autre assolé »
-    return "Autre assolé";
+  // Remplacements choisis dans la boîte d'export, par libellé affiché : ils
+  // priment sur la correspondance automatique (vide = automatique).
+  const replacements = options.cultureReplacements || {};
+  const exportCulture = ({ value, precision }) => {
+    if (!value) return "";
+    const replacement = String(replacements[cultureDisplayLabel(value)] ?? "").trim();
+    if (replacement) return replacement;
+    if (structureLookup) return resolveStructureCulture(structureLookup, value, precision).value;
+    return formatCultureValue(value);
   };
 
   const rows = (features || []).map((feature, idx) => {
@@ -476,17 +613,7 @@ export async function buildParcellesCsv(
     const typeSol =
       props.type_sol ?? props.typeSol ?? props.type_de_sol ?? props.sol ?? "";
     const irrigable = firstNonEmptyProp(props, IRRIGABLE_KEYS);
-    const cultureNRaw = readCultureValue(props, getCultureColumn("current"));
-    const cultureNValue = cultureNRaw ? (labelFromCode(cultureNRaw) || cultureNRaw) : "";
-    const cultureNCode = cultureNRaw ? getMetacodeFromValue(cultureNRaw) : "";
-    const precN = getPrecisionByYearIndex(props, 0);
-    const cultureNOutput = structureLookup
-      ? resolveCulture(cultureNValue, cultureNCode, precN)
-      : cultureNValue;
-    const cultureN1Value = firstNonEmptyProp(props, CULTURE_PREV_KEYS[0]);
-    const cultureN2Value = firstNonEmptyProp(props, CULTURE_PREV_KEYS[1]);
-    const cultureN3Value = firstNonEmptyProp(props, CULTURE_PREV_KEYS[2]);
-    const cultureN4Value = firstNonEmptyProp(props, CULTURE_PREV_KEYS[3]);
+    const cultures = exportCultureEntries(props).map(exportCulture);
 
     return [
       secteur || props.secteur || "",
@@ -497,19 +624,7 @@ export async function buildParcellesCsv(
       formatParcelleBioValue(parcelleBio),
       typeSol == null ? "" : String(typeSol),
       formatIrrigabiliteValue(irrigable),
-      cultureNOutput,
-      structureLookup
-        ? resolveCulture(cultureN1Value, "", getPrecisionByYearIndex(props, 1))
-        : formatCultureValue(cultureN1Value),
-      structureLookup
-        ? resolveCulture(cultureN2Value, "", getPrecisionByYearIndex(props, 2))
-        : formatCultureValue(cultureN2Value),
-      structureLookup
-        ? resolveCulture(cultureN3Value, "", getPrecisionByYearIndex(props, 3))
-        : formatCultureValue(cultureN3Value),
-      structureLookup
-        ? resolveCulture(cultureN4Value, "", getPrecisionByYearIndex(props, 4))
-        : formatCultureValue(cultureN4Value),
+      ...cultures,
       formatGeometry(feature),
     ];
   });

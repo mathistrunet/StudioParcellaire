@@ -16,6 +16,7 @@ Permettre la saisie, la correction et l'enrichissement des informations metier a
 - type de sol
 - bio / conduite bio
 - cultures de `N+1` a `N-6`
+- interculture de la campagne N (colonne « Interculture N », cle `interculture`) : derobee, CIPAN, couvert semes sur la meme parcelle que la culture N ; exportee en `CIP_CULTU` dans le shapefile, absente du CSV Assolia
 - options avancees de culture
 - autocompletion codes/libelles
 - remplissage via RPG
