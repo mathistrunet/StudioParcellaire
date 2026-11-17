@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
+  INTERCULTURE_COLUMNS,
   foldSecondaryParcels,
   isIntercultureLabel,
   isSecondaryParcel,
@@ -40,6 +41,29 @@ describe("libellés et types", () => {
     expect(avec).toMatchObject({ interculture: "Ray-grass dérobée", INTERCULT: "Ray-grass dérobée" });
     expect(avec.CIP_CULTU).toBeUndefined();
     expect(setInterculture(avec, "  ")).toEqual({});
+  });
+});
+
+describe("une interculture par année", () => {
+  it("propose une colonne par colonne de culture, de N+1 à N-6", () => {
+    expect(INTERCULTURE_COLUMNS.map((c) => c.label)).toEqual([
+      "Interculture N+1", "Interculture N", "Interculture N-1", "Interculture N-2",
+      "Interculture N-3", "Interculture N-4", "Interculture N-5", "Interculture N-6",
+    ]);
+  });
+
+  it("range chaque année sous sa propre clé, sans toucher aux autres", () => {
+    let props = setInterculture({}, "Moutarde", "current");
+    props = setInterculture(props, "Ray-grass dérobée", "prev1");
+    props = setInterculture(props, "Phacélie", "prev2");
+    expect(props).toMatchObject({
+      interculture: "Moutarde", interculture_n1: "Ray-grass dérobée", interculture_n2: "Phacélie",
+    });
+    expect(readInterculture(props, "prev1")).toBe("Ray-grass dérobée");
+    props = setInterculture(props, "", "prev1");
+    expect(readInterculture(props, "prev1")).toBe("");
+    expect(readInterculture(props, "current")).toBe("Moutarde");
+    expect(readInterculture(props, "prev2")).toBe("Phacélie");
   });
 });
 

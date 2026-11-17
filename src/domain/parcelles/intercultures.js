@@ -1,10 +1,11 @@
 // src/domain/parcelles/intercultures.js
 //
-// Interculture (culture intermédiaire, dérobée, couvert) de la campagne N.
+// Intercultures (culture intermédiaire, dérobée, couvert), une par année de
+// culture : N+1, N, N-1 … N-6, comme les colonnes de cultures.
 //
-// Une interculture occupe la même parcelle que la culture principale, avant ou
-// après elle. Ce n'est donc pas une parcelle de plus mais une valeur de la
-// parcelle, rangée sous la clé `interculture`.
+// Une interculture occupe la même parcelle que la culture principale de la même
+// campagne, avant ou après elle. Ce n'est donc pas une parcelle de plus mais une
+// valeur de la parcelle, rangée à côté de la culture de son année.
 //
 // Pourquoi ce module : Geofolia exporte chaque culture d'une campagne comme une
 // parcelle à part. Sa seconde culture (souvent « Ray-grass dérobée », parfois une
@@ -13,53 +14,103 @@
 // parcelle principale. Importées telles quelles, ces lignes posaient une parcelle
 // sur une autre. On les replie donc sur leur parcelle principale à l'import.
 
-import * as polygonClipping from "polygon-clipping";
-import { getCultureColumn, readCultureValue } from "./cultureColumns";
+// Le module ESM de polygon-clipping n'a qu'un export par défaut.
+import polygonClipping from "polygon-clipping";
+import { CULTURE_COLUMNS, getCultureColumn, readCultureValue } from "./cultureColumns";
 
-const clipIntersection =
-  polygonClipping.intersection ?? polygonClipping.default?.intersection;
+const clipIntersection = polygonClipping.intersection;
 
-/** Clés écrites pour l'interculture (la seconde sert au shapefile, en majuscules). */
-export const INTERCULTURE_WRITE_KEYS = ["interculture", "INTERCULT"];
+// Clés d'une interculture selon le décalage d'années de sa colonne de culture.
+// N garde `interculture` (et `INTERCULT` pour le shapefile) et lit aussi les
+// champs Geofolia de culture intermédiaire principale / secondaire.
+function keysForOffset(offset) {
+  if (offset === 0) {
+    return {
+      writeKeys: ["interculture", "INTERCULT"],
+      readKeys: [
+        "interculture", "INTERCULT", "interculture_n", "culture_intermediaire",
+        "CIP_CULTU", "cip_cultu", "CIS_CULTU", "cis_cultu",
+      ],
+    };
+  }
+  if (offset > 0) {
+    return {
+      writeKeys: [`interculture_n_plus${offset}`],
+      readKeys: [`interculture_n_plus${offset}`, `interculture_nplus${offset}`],
+    };
+  }
+  const k = -offset;
+  return {
+    writeKeys: [`interculture_n${k}`],
+    readKeys: [`interculture_n${k}`, `interculture_n_${k}`, `INTERCULT${k}`],
+  };
+}
 
-/** Clés lues : celles qu'on écrit et les champs Geofolia (culture intermédiaire principale / secondaire). */
-const INTERCULTURE_READ_KEYS = [
-  "interculture", "INTERCULT", "interculture_n", "culture_intermediaire",
-  "CIP_CULTU", "cip_cultu", "CIS_CULTU", "cis_cultu",
-];
+/**
+ * Colonnes d'interculture, dans l'ordre des colonnes de cultures. `cultureId` est
+ * l'identifiant de la colonne de culture de la même année (`current`, `prev1`…).
+ */
+export const INTERCULTURE_COLUMNS = CULTURE_COLUMNS.map((col) => ({
+  id: col.id === "current" ? "interculture" : `interculture_${col.id}`,
+  cultureId: col.id,
+  offset: col.offset,
+  label: col.label.replace(/^Culture/, "Interculture"),
+  ...keysForOffset(col.offset),
+}));
+
+const BY_CULTURE_ID = new Map(INTERCULTURE_COLUMNS.map((col) => [col.cultureId, col]));
+const BY_ID = new Map(INTERCULTURE_COLUMNS.map((col) => [col.id, col]));
+
+/** Colonne d'interculture d'une colonne de culture (`current`, `prev1`…) ou par son propre id. */
+export const getIntercultureColumn = (id = "current") => BY_CULTURE_ID.get(id) ?? BY_ID.get(id) ?? null;
 
 const SEPARATEUR = " + ";
 
 // Les .dbf complètent parfois un champ vide par des octets nuls.
 const clean = (value) => (value == null ? "" : String(value).replaceAll("\u0000", "").trim());
 
-/** Interculture de la parcelle, `""` si aucune. Deux intercultures sont jointes par « + ». */
-export function readInterculture(props = {}) {
+/**
+ * Interculture d'une année (`current` par défaut), `""` si aucune. Deux
+ * intercultures lues sous des clés différentes sont jointes par « + ».
+ */
+export function readInterculture(props = {}, cultureId = "current") {
+  const column = getIntercultureColumn(cultureId);
+  if (!column) return "";
   const values = [];
-  for (const key of INTERCULTURE_READ_KEYS) {
+  for (const key of column.readKeys) {
     const value = clean(props?.[key]);
     if (!value) continue;
-    // `interculture` porte déjà la valeur complète : les autres clés n'en sont que des copies.
-    if (key === "interculture" || key === "INTERCULT") return value;
+    // Une clé écrite porte déjà la valeur complète : les autres n'en sont que des copies.
+    if (column.writeKeys.includes(key)) return value;
     if (!values.includes(value)) values.push(value);
   }
   return values.join(SEPARATEUR);
 }
 
+/** Valeur brute telle que saisie (espace finale comprise), pour un champ de saisie. */
+export function readIntercultureInput(props = {}, cultureId = "current") {
+  const column = getIntercultureColumn(cultureId);
+  const raw = column ? props?.[column.writeKeys[0]] : null;
+  return raw != null ? String(raw) : readInterculture(props, cultureId);
+}
+
 /**
- * Écrit (ou efface, si vide) l'interculture. Retourne un nouvel objet de propriétés.
- * Le texte n'est pas rogné : la saisie au clavier doit pouvoir finir par une espace.
+ * Écrit (ou efface, si vide) l'interculture d'une année. Retourne un nouvel objet
+ * de propriétés. Le texte n'est pas rogné : la saisie au clavier doit pouvoir
+ * finir par une espace.
  */
-export function setInterculture(props = {}, value) {
+export function setInterculture(props = {}, value, cultureId = "current") {
   const next = { ...(props || {}) };
-  INTERCULTURE_READ_KEYS.forEach((key) => { delete next[key]; });
+  const column = getIntercultureColumn(cultureId);
+  if (!column) return next;
+  column.readKeys.forEach((key) => { delete next[key]; });
   const text = value == null ? "" : String(value);
-  if (text.trim()) INTERCULTURE_WRITE_KEYS.forEach((key) => { next[key] = text; });
+  if (text.trim()) column.writeKeys.forEach((key) => { next[key] = text; });
   return next;
 }
 
 const sansAccent = (text) =>
-  clean(text).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  clean(text).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 
 /**
  * Vrai si le libellé désigne une culture intermédiaire : dérobée, CIPAN, CIVE,

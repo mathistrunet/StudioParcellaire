@@ -16,12 +16,18 @@ import ParcelSoilPanel from "./ParcelSoilPanel";
 import {
   CULTURE_COLUMNS,
   clearCulture,
+  getCultureColumn,
   hasCultureValue,
   readCulturePrecision,
   readCultureValue,
   setCulture,
 } from "../domain/parcelles/cultureColumns";
-import { readInterculture, setInterculture } from "../domain/parcelles/intercultures";
+import {
+  INTERCULTURE_COLUMNS,
+  readInterculture,
+  readIntercultureInput,
+  setInterculture,
+} from "../domain/parcelles/intercultures";
 
 
 
@@ -261,34 +267,56 @@ const confidenceBadgeStyle = {
 
 const SOIL_COLUMN = { id: "type_sol", label: "Type de sol", width: 160 };
 
-// Culture intermédiaire de la campagne N (dérobée, CIPAN…), sur la même parcelle
-// que la culture N : voir domain/parcelles/intercultures.js.
-const INTERCULTURE_COLUMN = { id: "interculture", label: "Interculture N", width: 170 };
+// Culture intermédiaire de chaque campagne (dérobée, CIPAN…), sur la même parcelle
+// que la culture de la même année : voir domain/parcelles/intercultures.js.
+const INTERCULTURE_TABLE_COLUMNS = INTERCULTURE_COLUMNS.map((col) => ({
+  id: col.id,
+  label: col.label,
+  width: 170,
+  cultureId: col.cultureId,
+}));
 
 /** Toutes les colonnes proposées au filtre, dans l'ordre d'affichage. */
 const ALL_COLUMNS = [
   ...FIXED_COLUMNS,
   ...CULTURE_COLUMNS.map((col) => ({ id: col.id, label: col.label, width: 150 })),
-  INTERCULTURE_COLUMN,
+  ...INTERCULTURE_TABLE_COLUMNS,
   SOIL_COLUMN,
   ...ADVANCED_COLUMNS.map((col) => ({ id: col.id, label: col.label, width: 150 })),
 ];
 
 // Colonnes masquées au premier affichage : les options avancées et les
 // millésimes les plus anciens, rarement renseignés, encombrent la saisie.
+// Intercultures visibles d'emblée : N, N-1 et N-2 ; les autres années restent
+// accessibles par le choix des colonnes.
+const DEFAULT_HIDDEN_INTERCULTURES = INTERCULTURE_TABLE_COLUMNS.filter(
+  (col) => !["current", "prev1", "prev2"].includes(col.cultureId)
+).map((col) => col.id);
+
 const DEFAULT_HIDDEN_COLUMNS = [
   ...ADVANCED_COLUMNS.map((col) => col.id),
   "prev5",
   "prev6",
+  ...DEFAULT_HIDDEN_INTERCULTURES,
 ];
 
-const HIDDEN_COLUMNS_KEY = "studioparcellaire.colonnes-masquees";
+// v2 : apparition des intercultures par année. Un réglage v1 est repris, en y
+// ajoutant les intercultures masquées par défaut, sinon les huit nouvelles
+// colonnes s'afficheraient d'un coup chez qui avait déjà réglé son tableau.
+const HIDDEN_COLUMNS_KEY = "studioparcellaire.colonnes-masquees.v2";
+const HIDDEN_COLUMNS_KEY_V1 = "studioparcellaire.colonnes-masquees";
 
 const COLUMN_HINTS = {
   bio: "Conduite en agriculture biologique",
   irrigable: "Parcelle irrigable — colonne « Irrigabilité » du CSV Assolia",
-  interculture:
-    "Dérobée ou culture intermédiaire de la campagne N, sur la même parcelle que la culture N. Exportée en CIP_CULTU dans le shapefile ; absente du format CSV Assolia.",
+  ...Object.fromEntries(
+    INTERCULTURE_TABLE_COLUMNS.map((col) => [
+      col.id,
+      col.cultureId === "current"
+        ? "Dérobée ou culture intermédiaire de la campagne N, sur la même parcelle que la culture N. Exportée en CIP_CULTU dans le shapefile ; absente du format CSV Assolia."
+        : `Dérobée ou culture intermédiaire de la même campagne que la « ${getCultureColumn(col.cultureId)?.label} ». Conservée dans l'outil, non exportée.`,
+    ])
+  ),
   prev5: "Conservée dans l'outil, non exportée vers le CSV Assolia",
   prev6: "Conservée dans l'outil, non exportée vers le CSV Assolia",
 };
@@ -413,21 +441,21 @@ const TableRow = React.memo(function TableRow({
           />
         </td>
       ))}
-      {affiche("interculture") && (
-        <td style={cellStyle}>
+      {INTERCULTURE_TABLE_COLUMNS.filter((col) => affiche(col.id)).map((col) => (
+        <td key={col.id} style={cellStyle}>
           <input
             list="cultures-col-current"
-            value={props.interculture ?? readInterculture(props)}
+            value={readIntercultureInput(props, col.cultureId)}
             placeholder="—"
             onChange={(e) => {
               const val = e.target.value;
-              onUpdateField(idKey, (p) => setInterculture(p, val));
+              onUpdateField(idKey, (p) => setInterculture(p, val, col.cultureId));
             }}
             onClick={(e) => e.stopPropagation()}
             style={inputStyle}
           />
         </td>
-      )}
+      ))}
       {affiche("type_sol") && (
         <td style={cellStyle}>
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -541,6 +569,8 @@ export default function ParcelleEditor({
     try {
       const brut = window.localStorage.getItem(HIDDEN_COLUMNS_KEY);
       if (brut) return JSON.parse(brut);
+      const ancien = window.localStorage.getItem(HIDDEN_COLUMNS_KEY_V1);
+      if (ancien) return [...new Set([...JSON.parse(ancien), ...DEFAULT_HIDDEN_INTERCULTURES])];
     } catch {
       /* stockage indisponible : on repart des colonnes par défaut */
     }
@@ -992,6 +1022,9 @@ export default function ParcelleEditor({
    */
   const moveCulturesOnProps = useCallback((props, srcDef, destDef) => {
     const srcValue = readCultureValue(props, srcDef);
+    // L'interculture suit la culture de son année : elle se déplace avec elle,
+    // selon les mêmes règles (source vide = destination intacte).
+    const srcInter = readInterculture(props, srcDef.id);
     let next = props;
 
     if (destDef && srcValue) {
@@ -1000,9 +1033,16 @@ export default function ParcelleEditor({
         next = setCulture(next, destDef, srcValue, readCulturePrecision(props, srcDef));
       }
     }
+    if (destDef && srcInter) {
+      const destOccupied = readInterculture(next, destDef.id) !== "";
+      if (moveOverwriteDest || !destOccupied) {
+        next = setInterculture(next, srcInter, destDef.id);
+      }
+    }
 
     if (!moveKeepSource) {
       next = clearCulture(next, srcDef);
+      if (srcInter) next = setInterculture(next, "", srcDef.id);
     }
 
     return next;
@@ -1018,7 +1058,9 @@ export default function ParcelleEditor({
       const props = feature?.properties || {};
       const next = moveCulturesOnProps(props, srcDef, destDef);
       const changed = CULTURE_COLUMNS.some(
-        (col) => readCultureValue(props, col) !== readCultureValue(next, col)
+        (col) =>
+          readCultureValue(props, col) !== readCultureValue(next, col) ||
+          readInterculture(props, col.id) !== readInterculture(next, col.id)
       );
       if (changed) touched += 1;
     });

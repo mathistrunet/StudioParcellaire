@@ -26,6 +26,11 @@ namespace StudioParcellaire
         // node:sqlite, utilisé pour le parcellaire, n'est disponible sans option qu'à partir de cette version.
         private static readonly Version MinNodeVersion = new Version(22, 13);
         private static readonly string BaseUrl = "http://localhost:" + Port + "/";
+        // Le serveur n'écoute que sur 127.0.0.1 (scripts/http-security.mjs). « localhost »
+        // est d'abord résolu en ::1 par Windows : chaque essai attendait alors ses 2 s sur
+        // l'IPv6 sans jamais retomber sur l'IPv4, et le lanceur concluait à une panne.
+        // Le navigateur, lui, retombe tout seul sur 127.0.0.1 : il garde BaseUrl.
+        private static readonly string ProbeUrl = "http://127.0.0.1:" + Port + "/api/parcelles";
 
         private readonly TextBox _log;
         private readonly Label _status;
@@ -368,7 +373,7 @@ namespace StudioParcellaire
 
                 try
                 {
-                    var request = (HttpWebRequest)WebRequest.Create(BaseUrl + "api/parcelles");
+                    var request = (HttpWebRequest)WebRequest.Create(ProbeUrl);
                     request.Timeout = 2000;
                     request.Method = "GET";
                     using ((HttpWebResponse)request.GetResponse()) { return true; }

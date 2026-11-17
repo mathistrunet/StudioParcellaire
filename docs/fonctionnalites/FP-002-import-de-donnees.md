@@ -88,6 +88,6 @@ interculture.
 
 ## Limites / dette
 
-- l'interculture ne vaut que pour la campagne N : « Deplacer cultures » ne la decale pas
+- a l'import, l'interculture repliee va toujours dans la campagne N du fichier (Interculture N)
 
 ## Evolutions recommandees

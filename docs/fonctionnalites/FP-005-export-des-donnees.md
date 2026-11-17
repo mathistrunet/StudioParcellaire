@@ -68,7 +68,7 @@ Champs (noms et tailles repris de Geofolia) :
 | `CP_CULTU` | C100 | culture N (libelle) |
 | `CULT_PREC` | C100 | culture N-1 |
 | `CULT_PREC2` | C100 | culture N-2 |
-| `CIP_CULTU` | C100 | interculture de la campagne N |
+| `CIP_CULTU` | C100 | interculture de la campagne N (les intercultures N-1 et plus anciennes ne sont pas exportees) |
 | `TYPE_SOL` | C75 | type de sol |
 
 Texte en Windows-1252 (octet LDID 0x03 et `.cpg` « 1252 »). Les libelles de culture

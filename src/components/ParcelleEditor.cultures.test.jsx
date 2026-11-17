@@ -10,6 +10,7 @@ import { describe, expect, it, afterEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { getCultureColumn, readCultureValue } from "../domain/parcelles/cultureColumns";
+import { readInterculture } from "../domain/parcelles/intercultures";
 
 if (typeof window.URL.createObjectURL !== "function") {
   window.URL.createObjectURL = () => "blob:test";
@@ -195,6 +196,22 @@ describe("ParcelleEditor — déplacement des colonnes de cultures", () => {
     // La parcelle 2024 n'était pas affichée : son historique est inchangé.
     expect(colonne(cleanup.state.features[1].properties, "prev1")).toBe("ORH");
     expect(colonne(cleanup.state.features[1].properties, "prev2")).toBeNull();
+  });
+
+  it("emporte l'interculture avec la culture de son année", () => {
+    cleanup = renderTable([
+      feature("p1", { cultureN: "MIS", interculture: "Ray-grass dérobée", cultureN_1: "BTH" }),
+    ]);
+
+    deplacerCultures(cleanup.container, { de: "Culture N-1", vers: "Culture N-2" });
+    deplacerCultures(cleanup.container, { de: "Culture N", vers: "Culture N-1" });
+
+    const props = cleanup.state.features[0].properties;
+    expect(colonne(props, "prev1")).toBe("MIS");
+    expect(readInterculture(props, "prev1")).toBe("Ray-grass dérobée");
+    expect(readInterculture(props, "current")).toBe("");
+    expect(colonne(props, "prev2")).toBe("BTH");
+    expect(readInterculture(props, "prev2")).toBe("");
   });
 
   it("rafraîchit l'affichage du tableau après le déplacement", () => {
