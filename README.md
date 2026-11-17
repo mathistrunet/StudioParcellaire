@@ -5,8 +5,9 @@ parcellaire existant, on corrige les contours sur une carte, on complète les
 informations (nom, surface, conduite AB, cultures N à N-6, type de sol), puis on
 exporte vers Assolia (CSV), Télépac (XML) ou un SIG (shapefile).
 
-Tout se passe sur le poste : aucune donnée de parcellaire n'est envoyée sur
-Internet, seules les tuiles des fonds de carte sont téléchargées.
+Le parcellaire reste enregistré sur le poste. Seuls des services en ligne sont
+interrogés à la demande : fonds de carte, RPG, toponymie IGN et SoilGrids (qui
+reçoit les coordonnées des parcelles lors du remplissage du type de sol).
 
 ## Démarrage rapide (Windows)
 
@@ -15,7 +16,7 @@ installe les dépendances si nécessaire, construit l'interface, démarre le
 serveur local et ouvre le navigateur sur <http://localhost:4174>. Fermer la
 fenêtre du lanceur arrête le serveur.
 
-Seul prérequis : [Node.js](https://nodejs.org/) (version LTS).
+Seul prérequis : [Node.js](https://nodejs.org/) 22.13 ou plus récent (version LTS).
 
 Pour régénérer l'exécutable après modification du lanceur :
 
@@ -41,6 +42,51 @@ Pour développer avec rechargement à chaud, deux terminaux :
 ```bash
 npm run backend   # API locale sur le port 4174
 npm run dev       # interface sur http://localhost:5173
+```
+
+### Sécurité du serveur local
+
+Le serveur n'a pas d'authentification. Il n'écoute donc que sur `127.0.0.1` et
+refuse les requêtes venant d'une autre origine que l'application (ports 4174 et
+5173) ou portant un en-tête `Host` non local. Ces réglages se changent par
+variables d'environnement :
+
+| Variable                 | Rôle                                                  | Défaut            |
+| ------------------------ | ----------------------------------------------------- | ----------------- |
+| `STUDIO_HOST`            | Adresse d'écoute                                      | `127.0.0.1`       |
+| `STUDIO_ALLOWED_ORIGINS` | Origines ajoutées, séparées par des virgules          | aucune            |
+| `STUDIO_MAX_BODY_BYTES`  | Taille maximale d'un corps PUT/POST (au-delà : `413`) | 100 Mo            |
+
+Exposer le serveur sur le réseau demande les deux premières options. Tout poste
+qui atteint alors le port peut lire et écraser le parcellaire : ne le faites
+que sur un réseau de confiance.
+
+```bash
+STUDIO_HOST=0.0.0.0 STUDIO_ALLOWED_ORIGINS=http://192.168.1.10:4174 npm run backend
+```
+
+### API d'enrichissement
+
+`POST /api/v1/enrich` enrichit une parcelle à partir d'un point ou d'un contour :
+contour et surface RPG, nom, cultures par millésime, conduite bio. Rien n'est
+conservé côté serveur. Le contrat est dans
+[`docs/api/openapi-v1.json`](docs/api/openapi-v1.json).
+
+```bash
+curl -X POST http://localhost:4174/api/v1/enrich -H "Content-Type: application/json" -d '{"geometry":{"type":"Point","coordinates":[1.6,48.2]},"millesimes":[2025,2024]}'
+```
+
+### API des données publiques
+
+Le serveur lit aussi, pour une emprise donnée, le relief et la hauteur de végétation
+(LiDAR HD, RGE ALTI, SRTM), le RPG et la BD TOPO de l'IGN : `GET /api/v1/terrain`,
+`/api/v1/rpg`, `/api/v1/bdtopo`. `GET /api/v1/parcelles` renvoie une fiche par parcelle
+(nom, surface, culture, bio, Télépac, précédents sur 5 à 7 ans complétés par le RPG). Les réponses de l'IGN sont gardées 30 jours dans
+`%APPDATA%\StudioParcellaire\cache\geoplateforme\`. Détail dans
+[FP-012](docs/fonctionnalites/FP-012-api-v1-donnees-publiques.md).
+
+```bash
+curl "http://localhost:4174/api/v1/bdtopo?couche=batiments&bbox=1.90,42.99,1.93,43.01"
 ```
 
 ## Fonctionnement de l'outil
@@ -72,13 +118,30 @@ différents.
 
 ### Périmètre de cette version
 
-La déduction automatique du type de sol (SoilGrids / cartes pédologiques) n'est
-pas activée : le type de sol se saisit manuellement. La carte des sols France
-reste disponible comme simple repère visuel dans l'onglet Calques.
+Le type de sol se saisit manuellement ou se déduit automatiquement :
+
+- **Remplir la colonne / Remplir WRB** (tableau) : interroge SoilGrids pour chaque
+  parcelle ; une pastille indique la confiance et ℹ️ ouvre le détail.
+- **Sols présentés** (onglet) : associe les sols détectés sur la carte des sols
+  France aux types de sol d'une structure. La carte doit être affichée.
+- **Grille SoilGrids** (onglet Calques) : affiche les pixels sur l'emprise visible.
 
 L'application démarre sans parcellaire enregistré. Le travail en cours est
 sauvegardé automatiquement sur le poste et rechargé à l'ouverture suivante ; le
-bouton **Réinitialiser** de la barre d'outils efface tout.
+bouton **Réinitialiser** de la barre d'outils efface tout, et une sauvegarde
+permet de revenir en arrière tant que le parcellaire reste vide.
+
+## Où sont les données
+
+Le parcellaire, les associations de sols et les caches SoilGrids sont enregistrés
+hors du dossier de l'application, dans `%APPDATA%StudioParcellaire` sous Windows
+(base SQLite `parcellaire.db`). Arrêter le serveur, remplacer le dossier de
+l'application ou la mettre à jour n'y touche pas. Rien n'est envoyé sur Internet,
+hormis les coordonnées transmises aux services en ligne lorsqu'on les interroge.
+
+Au premier démarrage, `data/parcelles.geojson` est repris dans la base s'il existe ;
+ce fichier n'est ni modifié ni supprimé, mais il n'est plus lu ensuite. La variable
+d'environnement `STUDIO_DATA_DIR` permet de choisir un autre dossier.
 
 ## Configuration optionnelle
 
@@ -139,67 +202,5 @@ npm run lint
 npm test
 ```
 
-## IGN / GeoPlateforme API key and endpoints
-Some raster layers (e.g. IGN plan and ortho imagery) require an API key. Obtain
-an API key from [IGN GeoPlateforme](https://geoservices.ign.fr/) and set it in
-`src/config/rasterLayers.js`:
-```js
-const geoPfKey = import.meta.env.VITE_GEO_PORTAIL_API_KEY;
-const withGeoPfKey = (template) =>
-  geoPfKey ? `${template}?apikey=${geoPfKey}` : template;
-
-// Generic WMTS template (e.g. ORTHOIMAGERY.ORTHOPHOTOS or SOL.SOL)
-map.addSource("wmts-layer", {
-  type: "raster",
-  tiles: [
-    withGeoPfKey(
-      `https://data.geopf.fr/wmts/${LAYER}/default/PM/{z}/{x}/{y}.${EXT}`,
-    ),
-  ],
-  tileSize: 256,
-  attribution: "© IGN",
-});
-map.addLayer({ id: "wmts-layer", type: "raster", source: "wmts-layer" });
-```
-
-### Reading the GeoPlateforme WMTS capabilities
-Use the GetCapabilities document to confirm the correct `LAYER`,
-`TILEMATRIXSET` (usually `PM` for WebMercator) and `FORMAT` values before
-configuring MapLibre:
-
-```bash
-curl "https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetCapabilities" \
-  | xmllint --format - \
-  | rg -n "<Layer>" -A6
-```
-The application now targets the new `https://data.geopf.fr` endpoints. The IGN
-Plan base map can be loaded through the GeoPlateforme TMS service and other
-layers (such as orthophotos or the soil map) rely on the WMTS endpoint on the
-same host.
-
-### MapLibre snippets
-```js
-// PLAN.IGN as a TMS raster base (y axis is flipped compared to XYZ)
-map.addSource("planign", {
-  type: "raster",
-  tiles: [
-    `https://data.geopf.fr/tiles/PLAN.IGN/{z}/{x}/{y}.png?apikey=${YOUR_IGN_KEY}`,
-  ],
-  tileSize: 256,
-  attribution: "© IGN",
-  scheme: "tms",
-});
-map.addLayer({ id: "planign", type: "raster", source: "planign" });
-
-// Generic WMTS template (e.g. ORTHOIMAGERY.ORTHOPHOTOS or SOL.SOL)
-map.addSource("wmts-layer", {
-  type: "raster",
-  tiles: [
-    `https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${LAYER}&STYLE=normal&TILEMATRIXSET=PM&TILEMATRIX={z}&TILECOL={x}&TILEROW={y}&FORMAT=${FORMAT}&apikey=${YOUR_IGN_KEY}`,
-  ],
-  tileSize: 256,
-  attribution: "© IGN",
-});
-map.addLayer({ id: "wmts-layer", type: "raster", source: "wmts-layer" });
-```
-
+Les mêmes vérifications (lint, tests, build) tournent automatiquement sur GitHub à chaque pull request et à chaque push
+sur `main` : voir [`.github/workflows/verifications.yml`](.github/workflows/verifications.yml).

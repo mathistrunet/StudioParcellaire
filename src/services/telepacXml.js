@@ -291,7 +291,11 @@ export function buildTelepacXML(features, options = {}) {
         const derogationUkraine = getBooleanProp(props, ["derogation_ukraine", "derogation-ukraine"]);
         const accidentCulture = getBooleanProp(props, ["accident_culture", "accident-culture"]);
         const maecElevage = getBooleanProp(props, ["maec_elevage_monogastrique", "elevage_monogastrique"]);
-        const isOrganic = isTruthyBoolean(firstProperty(props, ["isOrganic", "conduite_bio", "conduite-bio"]));
+        // Une coche venue du seul RPG public ne dit ni AB ni conversion : l'écrire ici
+        // ferait déclarer à Télépac un type de conduite que personne n'a confirmé.
+        const isOrganic =
+          props.bio_source !== "RPG" &&
+          isTruthyBoolean(firstProperty(props, ["isOrganic", "conduite_bio", "conduite-bio"]));
         const organicType = isOrganic
           ? (firstProperty(props, ["organicType", "type_conduite_bio", "type-conduite-bio"]) || "AB")
           : null;

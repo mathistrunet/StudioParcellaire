@@ -138,7 +138,7 @@ const TIPS = [
   },
   {
     label: "Type de sol",
-    text: "Dans cette version, le type de sol se saisit manuellement (colonne « Type de sol »). La déduction automatique depuis les cartes pédologiques n'est pas activée.",
+    text: "La colonne « Type de sol » se saisit à la main ou se remplit depuis SoilGrids (boutons en tête de colonne). L'onglet « Sols présentés » associe les sols de la carte des sols France aux types de votre structure. Ces services interrogent des serveurs en ligne.",
   },
   {
     label: "Aller-retour CSV",

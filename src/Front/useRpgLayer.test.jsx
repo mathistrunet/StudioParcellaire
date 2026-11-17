@@ -8,10 +8,12 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 // Le composant crée des popups MapLibre : on les remplace par une coquille qui
 // retient l'élément DOM, ce qui permet de cliquer « Importer cette parcelle ».
 let dernierePopup = null;
-vi.mock("maplibre-gl", () => {
+let dernierHtml = null;
+let libelleRpg = "Blé tendre";
+vi.mock("../services/maplibre", () => {
   class Popup {
     setLngLat() { return this; }
-    setHTML() { return this; }
+    setHTML(html) { dernierHtml = html; return this; }
     setDOMContent(el) { this.el = el; dernierePopup = this; return this; }
     addTo() { return this; }
     remove() { return this; }
@@ -21,7 +23,7 @@ vi.mock("maplibre-gl", () => {
 
 vi.mock("../services/rpg", () => ({
   fetchRpgGeoJSON: vi.fn(async () => ({ type: "FeatureCollection", features: [] })),
-  getCultureLabel: () => ({ label: "Blé tendre", code: "BTH" }),
+  getCultureLabel: () => ({ label: libelleRpg, code: "BTH" }),
   getMapBoundsCRS84: () => [1, 43, 2, 44],
 }));
 
@@ -51,7 +53,10 @@ function makeMap() {
       const key = maybeHandler ? `${event}:${layerOrHandler}` : event;
       handlers.set(key, maybeHandler || layerOrHandler);
     },
-    off: () => {},
+    off: (event, layerOrHandler, maybeHandler) => {
+      const key = maybeHandler ? `${event}:${layerOrHandler}` : event;
+      if (handlers.get(key) === (maybeHandler || layerOrHandler)) handlers.delete(key);
+    },
     once: (event, handler) => handlers.set(`once:${event}`, handler),
   };
 }
@@ -61,11 +66,10 @@ const rpgFeature = {
   properties: { NUMERO: "42" },
 };
 
-function render({ onImported } = {}) {
+function render({ onImported, map = makeMap() } = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  const map = makeMap();
   const draw = { add: vi.fn() };
   act(() => {
     root.render(
@@ -90,6 +94,37 @@ async function importerUneParcelle(vue) {
     dernierePopup.el.querySelector("#btn-import-rpg").click();
   });
 }
+
+describe("RpgFeature — libellé piégé venu du service RPG", () => {
+  const PIEGE = "<img src=x onerror=alert(1)>";
+  let vue;
+
+  afterEach(() => {
+    libelleRpg = "Blé tendre";
+    act(() => vue.root.unmount());
+    vue.container.remove();
+  });
+
+  it("l'affiche comme du texte au survol et au clic, et garde le bouton d'import", async () => {
+    libelleRpg = PIEGE;
+    vue = render({});
+    await act(async () => {
+      vue.container.querySelector('input[type="checkbox"]').click();
+    });
+    const evenement = { features: [rpgFeature], lngLat: { lng: 1.05, lat: 43.05 } };
+
+    act(() => vue.map.handlers.get("mousemove:rpg_fill")(evenement));
+    const survol = document.createElement("div");
+    survol.innerHTML = dernierHtml;
+    expect(survol.querySelector("img")).toBeNull();
+    expect(survol.textContent).toBe(PIEGE);
+
+    act(() => vue.map.handlers.get("click:rpg_fill")(evenement));
+    expect(dernierePopup.el.querySelector("img")).toBeNull();
+    expect(dernierePopup.el.textContent).toContain(PIEGE);
+    expect(dernierePopup.el.querySelector("#btn-import-rpg")).not.toBeNull();
+  });
+});
 
 describe("RpgFeature — import d'une parcelle", () => {
   let vue;
@@ -127,6 +162,29 @@ describe("RpgFeature — import d'une parcelle", () => {
     await importerUneParcelle(vue);
 
     expect(vue.draw.add.mock.calls[0][0].properties.annee).toBe(2019);
+  });
+
+  it("retient le millésime et le rappel courants après un retour sur l'onglet", async () => {
+    // Le changement d'onglet démonte le composant, mais la carte et ses couches restent.
+    const premier = render({});
+    const caseAcocher = premier.container.querySelector('input[type="checkbox"]');
+    await act(async () => {
+      caseAcocher.click();
+    });
+    act(() => premier.root.unmount());
+    premier.container.remove();
+
+    const onImported = vi.fn();
+    vue = render({ onImported, map: premier.map });
+    const select = vue.container.querySelector("select");
+    await act(async () => {
+      select.value = "2019";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await importerUneParcelle(vue);
+
+    expect(vue.draw.add.mock.calls[0][0].properties.annee).toBe(2019);
+    expect(onImported).toHaveBeenCalledTimes(1);
   });
 
   it("masque la couche quand le panneau est quitté", async () => {

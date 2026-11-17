@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../../services/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
 import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
@@ -14,7 +14,7 @@ if (typeof window !== "undefined") window.mapboxgl = maplibregl;
 const SOIL_LAYER_ID = "soil-wmts";
 const SOIL_TILES =
   "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile" +
-  "&LAYER=INRA.CARTE.SOLS&STYLE=normal&FORMAT=image/png" +
+  "&LAYER=INRA.CARTE.SOLS&STYLE=CARTE%20DES%20SOLS&FORMAT=image/png" +
   "&TILEMATRIXSET=PM&TILEMATRIX={z}&TILECOL={x}&TILEROW={y}";
 const SOIL_WMS =
   "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap" +
@@ -189,15 +189,6 @@ export function useMapInitialization() {
     }
   }, []);
 useEffect(() => {
-    if (typeof maplibregl.supported === "function" && !maplibregl.supported()) {
-      setMapInitError(
-        buildError(
-          ERROR_CODES.MAPLIBRE_UNSUPPORTED,
-          "Votre navigateur ne supporte pas WebGL."
-        )
-      );
-      return;
-    }
     const style = {
       version: 8,
       glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
@@ -222,12 +213,19 @@ useEffect(() => {
         maxPitch: 0,
       });
     } catch (error) {
+      // MapLibre 6 exige WebGL2 et le signale par cette erreur au lieu de maplibregl.supported().
       setMapInitError(
-        buildError(
-          ERROR_CODES.MAP_INIT_FAILED,
-          "Impossible d'initialiser la carte.",
-          error
-        )
+        error instanceof maplibregl.GPUInitializationError
+          ? buildError(
+              ERROR_CODES.MAPLIBRE_UNSUPPORTED,
+              "Votre navigateur ne supporte pas WebGL2.",
+              error
+            )
+          : buildError(
+              ERROR_CODES.MAP_INIT_FAILED,
+              "Impossible d'initialiser la carte.",
+              error
+            )
       );
       return;
     }

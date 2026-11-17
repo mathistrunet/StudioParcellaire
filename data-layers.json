@@ -6,9 +6,9 @@
       "dataset": "referentiels",
       "directory": ".",
       "name": "assolia_cultures_export.csv",
-      "size": 67577,
+      "size": 67001,
       "bbox": null,
-      "updatedAt": "2026-08-11T12:33:52Z",
+      "updatedAt": "2026-09-04T13:44:07Z",
       "url": "https://github.com/mathistrunet/StudioParcellaire/releases/download/layers-referentiels-v1/assolia_cultures_export.csv"
     },
     {

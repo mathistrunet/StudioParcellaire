@@ -1,38 +1,38 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 import { parseParcellesCsvToFeatures, buildParcellesCsv } from "./parcellesCsv";
 import {
-  SEBASTIEN_CSV_TEXT,
-  SEBASTIEN_CSV_EXPECTED_COUNT,
-  SEBASTIEN_CSV_EXPECTED_NAMES,
-  SEBASTIEN_CSV_EXPECTED_SURFACES,
-} from "../__fixtures__/sebastien-2025.csv.js";
+  EXEMPLE_CSV_TEXT,
+  EXEMPLE_CSV_EXPECTED_COUNT,
+  EXEMPLE_CSV_EXPECTED_NAMES,
+  EXEMPLE_CSV_EXPECTED_SURFACES,
+} from "../__fixtures__/exploitation-exemple-2025.csv.js";
 
 // parseParcellesCsvToFeatures uses FileReader — File is available in jsdom
 function makeFile(text, name = "test.csv") {
   return new File([text], name, { type: "text/csv" });
 }
 
-describe("parseParcellesCsvToFeatures — fixture Sébastien 2025", () => {
-  it(`parse exactement ${SEBASTIEN_CSV_EXPECTED_COUNT} parcelles`, async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
-    expect(features).toHaveLength(SEBASTIEN_CSV_EXPECTED_COUNT);
+describe("parseParcellesCsvToFeatures — fixture exploitation fictive 2025", () => {
+  it(`parse exactement ${EXEMPLE_CSV_EXPECTED_COUNT} parcelles`, async () => {
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
+    expect(features).toHaveLength(EXEMPLE_CSV_EXPECTED_COUNT);
   });
 
   it("extrait les noms de parcelles", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     const names = features.map((f) => f.properties.nom);
-    expect(names).toEqual(SEBASTIEN_CSV_EXPECTED_NAMES);
+    expect(names).toEqual(EXEMPLE_CSV_EXPECTED_NAMES);
   });
 
   it("extrait les surfaces", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     const surfaces = features.map((f) => f.properties.surface_parcelle);
-    expect(surfaces).toEqual(SEBASTIEN_CSV_EXPECTED_SURFACES);
+    expect(surfaces).toEqual(EXEMPLE_CSV_EXPECTED_SURFACES);
   });
 
   it("produit des géométries Polygon WGS84 valides", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     features.forEach((f) => {
       expect(f.type).toBe("Feature");
       expect(f.geometry.type).toBe("Polygon");
@@ -72,14 +72,14 @@ A;Test;000;P3;3;Non;;TRN;;;;;invalide
   });
 
   it("extrait le code exploitation / numéro pacage", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     features.forEach((f) => {
-      expect(f.properties.code_exploitation).toBe("082012345");
+      expect(f.properties.code_exploitation).toBe("099999997");
     });
   });
 
   it("extrait les cultures N et N-1", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     // Parcelle 1 : BTH + TRN (N-1)
     const p1 = features[0];
     expect(p1.properties.cultureN).toBeTruthy();
@@ -88,7 +88,7 @@ A;Test;000;P3;3;Non;;TRN;;;;;invalide
   });
 
   it("marque la parcelle bio correctement (Oui/Non)", async () => {
-    const features = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const features = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     expect(features[2].properties.parcelle_bio).toBe("Oui");
     expect(features[0].properties.parcelle_bio).toBe("Non");
   });
@@ -192,7 +192,7 @@ TEST;Expl;000111;P1;1.5;non;Limon;oui;Blé tendre;;;;;1.35,44.01 1.36,44.01 1.36
   });
 
   it("round-trip: parseParcellesCsvToFeatures ∘ buildParcellesCsv conserve les données", async () => {
-    const originalFeatures = await parseParcellesCsvToFeatures(makeFile(SEBASTIEN_CSV_TEXT));
+    const originalFeatures = await parseParcellesCsvToFeatures(makeFile(EXEMPLE_CSV_TEXT));
     const csv = await buildParcellesCsv(originalFeatures, "", "", "");
     const reparsed = await parseParcellesCsvToFeatures(makeFile(csv));
     expect(reparsed).toHaveLength(originalFeatures.length);
@@ -313,5 +313,112 @@ A;Test;000;P1;1;Non;;BTH;MIS;;;;1.35,44.01 1.36,44.01 1.36,44.02 1.35,44.02 1.35
     expect(features[0].properties.cultureN_1).toBeTruthy();
     expect(features[0].properties.cultureN_2).toBeTruthy();
     expect(features[0].properties.cultureN).toBeUndefined();
+  });
+});
+
+describe("buildParcellesCsv — remplacement des cultures", () => {
+  const ASSOLIA_CSV = `"culture_id";"culture_name";"structure_id";"structure_name";"metacode"
+"1";"Blé tendre d'hiver";"4";"TestStruct";"BTH"
+"2";"Maïs ensilage";"4";"TestStruct";"MIE"
+"3";"Dérobée ray-grass";"4";"TestStruct";""
+"4";"Autre Assolé";"4";"TestStruct";""
+`;
+  const geometry = {
+    type: "Polygon",
+    coordinates: [[[1.35, 44.01], [1.36, 44.01], [1.36, 44.02], [1.35, 44.01]]],
+  };
+  const parcelle = (cultures) => ({ type: "Feature", properties: { nom: "P", ...cultures }, geometry });
+  const cellules = (csv, ligne = 1) => csv.split(/\r?\n/)[ligne].split(";").slice(8, 13);
+
+  // Le référentiel est mémorisé par le module : on repart d'un module neuf pour
+  // ne pas hériter de celui des tests précédents.
+  let buildParcellesCsv;
+  let describeExportCultures;
+  beforeEach(async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => ASSOLIA_CSV })));
+    vi.resetModules();
+    ({ buildParcellesCsv, describeExportCultures } = await import("./parcellesCsv"));
+  });
+
+  it("sans structure : remplace un libellé partout où il apparaît, vide = inchangé", async () => {
+    const csv = await buildParcellesCsv(
+      [
+        parcelle({ cultureN: "MAÏS FOURRAGE", cultureN_1: "MAÏS FOURRAGE" }),
+        parcelle({ cultureN: "PRAIRIE PERMANENTE" }),
+      ],
+      "", "", "",
+      { cultureReplacements: { "MAÏS FOURRAGE": "Maïs ensilage", "PRAIRIE PERMANENTE": "  " } }
+    );
+    expect(cellules(csv, 1).slice(0, 2)).toEqual(["Maïs ensilage", "Maïs ensilage"]);
+    expect(cellules(csv, 2)[0]).toBe("PRAIRIE PERMANENTE");
+  });
+
+  it("avec structure : rapproche un libellé Geofolia par son nom, sans code PAC", async () => {
+    const csv = await buildParcellesCsv(
+      [parcelle({ cultureN: "BLÉ TENDRE D'HIVER" })],
+      "", "", "",
+      { structureName: "TestStruct" }
+    );
+    expect(cellules(csv)[0]).toBe("Blé tendre d'hiver");
+  });
+
+  it("avec structure : la culture choisie dans la liste remplace « Autre assolé »", async () => {
+    const options = { structureName: "TestStruct" };
+    const sans = await buildParcellesCsv([parcelle({ cultureN: "MAÏS FOURRAGE" })], "", "", "", options);
+    expect(cellules(sans)[0]).toBe("Autre Assolé");
+    const avec = await buildParcellesCsv([parcelle({ cultureN: "MAÏS FOURRAGE" })], "", "", "", {
+      ...options,
+      cultureReplacements: { "MAÏS FOURRAGE": "Maïs ensilage" },
+    });
+    expect(cellules(avec)[0]).toBe("Maïs ensilage");
+  });
+
+  it("describeExportCultures liste les cultures, les non reconnues d'abord, avec la liste de la structure", async () => {
+    const { cultures, structureCultures } = await describeExportCultures(
+      [
+        parcelle({ cultureN: "MAÏS FOURRAGE", cultureN_1: "BLÉ TENDRE D'HIVER" }),
+        parcelle({ cultureN: "MAÏS FOURRAGE" }),
+      ],
+      "TestStruct"
+    );
+    expect(cultures.map((c) => [c.label, c.count, c.reconnue, c.auto])).toEqual([
+      ["MAÏS FOURRAGE", 2, false, "Autre Assolé"],
+      ["BLÉ TENDRE D'HIVER", 1, true, "Blé tendre d'hiver"],
+    ]);
+    expect(structureCultures).toEqual(["Autre Assolé", "Blé tendre d'hiver", "Dérobée ray-grass", "Maïs ensilage"]);
+  });
+
+  it("describeExportCultures sans structure : reconnue = code PAC connu", async () => {
+    const { cultures, structureCultures } = await describeExportCultures([parcelle({ cultureN: "MAÏS FOURRAGE" })]);
+    expect(cultures).toEqual([{ label: "MAÏS FOURRAGE", count: 1, code: "", auto: "MAÏS FOURRAGE", reconnue: false }]);
+    expect(structureCultures).toEqual([]);
+  });
+});
+
+describe("buildParcellesCsv — libellé importé rattaché au code PAC", () => {
+  const ASSOLIA_CSV = `"culture_id";"culture_name";"structure_id";"structure_name";"metacode"
+"1";"Blé tendre";"4";"TestStruct";"BTH"
+`;
+  const geometry = {
+    type: "Polygon",
+    coordinates: [[[1.35, 44.01], [1.36, 44.01], [1.36, 44.02], [1.35, 44.01]]],
+  };
+  let mod;
+  beforeEach(async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => ASSOLIA_CSV })));
+    window.CODEBOOK_EXTRA = { "BTH|1": "Blé tendre d’hiver - semences", BTH: "Blé tendre d’hiver" };
+    vi.resetModules();
+    mod = await import("./parcellesCsv");
+  });
+  afterEach(() => {
+    delete window.CODEBOOK_EXTRA;
+  });
+
+  it("« BLÉ TENDRE D'HIVER » (Geofolia) est reconnu comme BTH malgré casse et apostrophe", async () => {
+    const features = [{ type: "Feature", properties: { nom: "P", cultureN: "BLÉ TENDRE D'HIVER" }, geometry }];
+    const csv = await mod.buildParcellesCsv(features, "", "", "", { structureName: "TestStruct" });
+    expect(csv.split(/\r?\n/)[1].split(";")[8]).toBe("Blé tendre");
+    const { cultures } = await mod.describeExportCultures(features);
+    expect(cultures[0]).toMatchObject({ code: "BTH", reconnue: true });
   });
 });

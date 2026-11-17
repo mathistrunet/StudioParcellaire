@@ -1,7 +1,15 @@
+import { featureCollectionsEqual } from "../utils/featureCollectionEquality";
+
 const PARCELLES_ENDPOINT = "/api/parcelles";
 const MATCH_VALIDATE_ENDPOINT = "/api/parcelles/matching/validate";
-// Clé unifiée avec ParcellesStore pour éviter deux entrées localStorage désynchronisées
-const LOCAL_STORAGE_KEY = "studioparcellaire.parcelles-temp";
+const BACKUPS_ENDPOINT = "/api/parcelles/backups";
+
+// Anciens emplacements du parcellaire dans le navigateur, lus une dernière fois puis retirés.
+const BROWSER_COPY_KEY = "studioparcellaire.parcelles-temp";
+const LEGACY_BROWSER_COPY_KEY = "parcelles.geojson";
+const BROWSER_COPY_VERSION_KEY = "studioparcellaire.parcelles-version";
+// Seule une copie posée par la version qui posait ce marqueur est un travail récent.
+const CURRENT_BROWSER_COPY_VERSION = "2";
 
 const normalizeFeature = (feature) => {
   if (!feature || typeof feature !== "object") return null;
@@ -44,89 +52,90 @@ const normalizeFeatureCollection = (payload) => {
   };
 };
 
-const canUseLocalStorage = () =>
-  typeof window !== "undefined" && typeof window.localStorage !== "undefined";
-
-// Migration one-shot : déplace les données de l'ancienne clé vers la clé unifiée
-const LEGACY_STORAGE_KEY = "parcelles.geojson";
-
-// Cette version démarre volontairement sans parcellaire enregistré. Un marqueur
-// de version purge donc une seule fois le brouillon local laissé par une
-// installation antérieure ; ensuite, la persistance reprend normalement d'une
-// session à l'autre.
-const STORAGE_VERSION_KEY = "studioparcellaire.parcelles-version";
-const STORAGE_VERSION = "2";
-const resetLocalStorageOnVersionChange = () => {
-  if (!canUseLocalStorage()) return;
+function readBrowserCopy() {
   try {
-    if (window.localStorage.getItem(STORAGE_VERSION_KEY) === STORAGE_VERSION) return;
-    window.localStorage.removeItem(LOCAL_STORAGE_KEY);
-    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
-    window.localStorage.setItem(STORAGE_VERSION_KEY, STORAGE_VERSION);
-  } catch { /* silencieux */ }
-};
-resetLocalStorageOnVersionChange();
-
-const migrateLocalStorageOnce = () => {
-  if (!canUseLocalStorage()) return;
-  try {
-    if (window.localStorage.getItem(LOCAL_STORAGE_KEY)) return; // déjà migré
-    const legacy = window.localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (!legacy) return;
-    window.localStorage.setItem(LOCAL_STORAGE_KEY, legacy);
-    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
-  } catch { /* silencieux */ }
-};
-migrateLocalStorageOnce();
-
-const loadLocalCollection = () => {
-  if (!canUseLocalStorage()) return null;
-  try {
-    const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) return null;
-    return normalizeFeatureCollection(JSON.parse(raw));
+    const storage = window.localStorage;
+    const raw = storage.getItem(BROWSER_COPY_KEY) ?? storage.getItem(LEGACY_BROWSER_COPY_KEY);
+    return {
+      collection: raw ? normalizeFeatureCollection(JSON.parse(raw)) : null,
+      isCurrent: storage.getItem(BROWSER_COPY_VERSION_KEY) === CURRENT_BROWSER_COPY_VERSION,
+    };
   } catch (error) {
-    console.warn("[PARCELLES_LOCAL_READ_FAILED] Lecture localStorage impossible.", error);
-    return null;
+    console.warn("[PARCELLES_BROWSER_COPY_UNREADABLE] Ancienne copie du navigateur illisible.", error);
+    return { collection: null, isCurrent: false };
   }
-};
+}
 
-const persistLocalCollection = (collection) => {
-  if (!canUseLocalStorage()) return;
+function removeBrowserCopy() {
   try {
-    window.localStorage.setItem(
-      LOCAL_STORAGE_KEY,
-      JSON.stringify(normalizeFeatureCollection(collection))
-    );
-  } catch (error) {
-    console.warn("[PARCELLES_LOCAL_WRITE_FAILED] Écriture localStorage impossible.", error);
+    window.localStorage.removeItem(BROWSER_COPY_KEY);
+    window.localStorage.removeItem(LEGACY_BROWSER_COPY_KEY);
+    window.localStorage.removeItem(BROWSER_COPY_VERSION_KEY);
+  } catch {
+    // Sans accès au stockage du navigateur, la copie restera simplement inutilisée.
   }
-};
+}
 
-const clearLocalCollection = () => {
-  if (!canUseLocalStorage()) return;
-  try {
-    window.localStorage.removeItem(LOCAL_STORAGE_KEY);
-  } catch (error) {
-    console.warn("[PARCELLES_LOCAL_CLEAR_FAILED] Suppression localStorage impossible.", error);
+async function sendCollection(collection, signal) {
+  const response = await fetch(PARCELLES_ENDPOINT, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(collection),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`[PARCELLES_SAVE_BACKEND_${response.status}] Enregistrement refusé.`);
   }
-};
+}
+
+async function sendBrowserCopyBackup(collection, signal) {
+  const response = await fetch(BACKUPS_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: "copie-navigateur", collection }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`[PARCELLES_BACKUP_BACKEND_${response.status}] Sauvegarde refusée.`);
+  }
+}
+
+/**
+ * Le navigateur gardait une copie du parcellaire : elle rejoint une fois la base locale.
+ * Si la base est vide, un travail récent y est repris ; sinon la base fait foi et la
+ * copie divergente devient une sauvegarde. Elle n'est retirée qu'après réussite.
+ */
+async function adoptBrowserCopy(serverCollection, signal) {
+  if (typeof window === "undefined") return serverCollection;
+  const { collection: copy, isCurrent } = readBrowserCopy();
+  if (!copy) return serverCollection;
+
+  let result = serverCollection;
+  if (copy.features.length > 0 && !featureCollectionsEqual(copy, serverCollection)) {
+    if (serverCollection.features.length === 0 && isCurrent) {
+      await sendCollection(copy, signal);
+      result = copy;
+    } else {
+      await sendBrowserCopyBackup(copy, signal);
+    }
+  }
+  removeBrowserCopy();
+  return result;
+}
 
 export async function fetchParcellesGeojson(signal) {
+  const response = await fetch(PARCELLES_ENDPOINT, { signal });
+  if (!response.ok) {
+    throw new Error(`[PARCELLES_FETCH_BACKEND_${response.status}] Chargement impossible.`);
+  }
+  const collection = normalizeFeatureCollection(await response.json());
   try {
-    const response = await fetch(PARCELLES_ENDPOINT, { signal });
-    if (!response.ok) {
-      throw new Error(`[PARCELLES_FETCH_BACKEND_${response.status}] Réponse backend invalide.`);
-    }
-    const data = await response.json();
-    const collection = normalizeFeatureCollection(data);
-    persistLocalCollection(collection);
-    return collection;
+    return await adoptBrowserCopy(collection, signal);
   } catch (error) {
-    const local = loadLocalCollection();
-    if (local) return local;
-    const message = error instanceof Error ? error.message : "Erreur inconnue";
-    throw new Error(`[PARCELLES_FETCH_FAILED] Chargement impossible: ${message}`);
+    if (error?.name === "AbortError") throw error;
+    // La copie reste en place et sera reprise au prochain chargement.
+    console.warn("[PARCELLES_BROWSER_COPY_NOT_ADOPTED]", error);
+    return collection;
   }
 }
 
@@ -135,7 +144,6 @@ export async function clearParcellesGeojson(signal) {
     type: "FeatureCollection",
     features: [],
   });
-  clearLocalCollection();
   const response = await fetch(PARCELLES_ENDPOINT, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -161,20 +169,29 @@ export async function saveParcellesGeojson(features, signal) {
     })),
   };
 
-  persistLocalCollection(collection);
+  await sendCollection(collection, signal);
+  return collection;
+}
 
-  const response = await fetch(PARCELLES_ENDPOINT, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(collection),
+/** Sauvegarde la plus récente faite avant un effacement, ou null. */
+export async function fetchLatestClearedBackup(signal) {
+  const response = await fetch(BACKUPS_ENDPOINT, { signal });
+  if (!response.ok) {
+    throw new Error(`[PARCELLES_BACKUPS_BACKEND_${response.status}] Sauvegardes inaccessibles.`);
+  }
+  const { backups } = await response.json();
+  return (backups || []).find((backup) => backup.reason === "avant-effacement") ?? null;
+}
+
+export async function restoreParcellesBackup(id, signal) {
+  const response = await fetch(`${BACKUPS_ENDPOINT}/${encodeURIComponent(id)}/restore`, {
+    method: "POST",
     signal,
   });
-
   if (!response.ok) {
-    throw new Error(`[PARCELLES_SAVE_BACKEND_${response.status}] Enregistrement refusé.`);
+    throw new Error(`[PARCELLES_RESTORE_BACKEND_${response.status}] Restauration impossible.`);
   }
-
-  return collection;
+  return normalizeFeatureCollection(await response.json());
 }
 
 export async function validateParcellesMatching(

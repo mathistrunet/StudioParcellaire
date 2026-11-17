@@ -16,6 +16,7 @@ Permettre la saisie, la correction et l'enrichissement des informations metier a
 - type de sol
 - bio / conduite bio
 - cultures de `N+1` a `N-6`
+- intercultures par annee, de `N+1` a `N-6` (colonnes « Interculture N », « Interculture N-1 »…) : derobee, CIPAN, couvert semes sur la meme parcelle que la culture de la meme campagne. Cles : `interculture` pour N, `interculture_n1`… pour N-1…, `interculture_n_plus1` pour N+1 (`src/domain/parcelles/intercultures.js`). N, N-1 et N-2 sont affichees par defaut. « Deplacer cultures » deplace l'interculture avec la culture de son annee. Seule l'interculture N est exportee (`CIP_CULTU` du shapefile) ; le CSV Assolia n'en a pas
 - options avancees de culture
 - autocompletion codes/libelles
 - remplissage via RPG

@@ -1,7 +1,8 @@
 // useRpgRomaniaLayer.jsx
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../services/maplibre";
 import { fetchRpgRomaniaGeoJSON, getRpgRomaniaId, RPG_RO_MAX_FEATURES } from "../services/rpgRomania";
+import { rpgHoverPopupHtml, rpgImportPopupHtml } from "../services/mapPopupHtml";
 
 /** Constantes */
 export const RPG_RO_MIN_ZOOM   = 12;
@@ -51,6 +52,15 @@ export default function RpgRomaniaFeature({
   const onImportedRef = useRef(onImported);
   useEffect(() => { onImportedRef.current = onImported; }, [onImported]);
 
+  // Le composant est démonté à chaque changement d'onglet alors que la carte, elle,
+  // survit. Ses gestionnaires doivent partir avec lui : ils liraient sinon les refs
+  // de l'instance disparue.
+  const detachHandlersRef = useRef(null);
+  useEffect(() => () => {
+    detachHandlersRef.current?.();
+    detachHandlersRef.current = null;
+  }, []);
+
   /** Crée la source + les couches + les handlers (une fois par style chargé) */
   const ensureSourceAndLayers = useCallback(() => {
     const map = mapRef?.current;
@@ -58,26 +68,28 @@ export default function RpgRomaniaFeature({
 
     const addAll = () => {
       if (!styleReady(map)) return;
-      if (map.getSource(RPG_RO_SOURCE_ID)) return; // déjà créé
+      if (!map.getSource(RPG_RO_SOURCE_ID)) {
+        map.addSource(RPG_RO_SOURCE_ID, {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
 
-      map.addSource(RPG_RO_SOURCE_ID, {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-      });
+        map.addLayer({
+          id: RPG_RO_LAYER_FILL,
+          type: "fill",
+          source: RPG_RO_SOURCE_ID,
+          paint: { "fill-color": "#0077b6", "fill-opacity": 0.18 },
+        });
 
-      map.addLayer({
-        id: RPG_RO_LAYER_FILL,
-        type: "fill",
-        source: RPG_RO_SOURCE_ID,
-        paint: { "fill-color": "#0077b6", "fill-opacity": 0.18 },
-      });
+        map.addLayer({
+          id: RPG_RO_LAYER_LINE,
+          type: "line",
+          source: RPG_RO_SOURCE_ID,
+          paint: { "line-color": "#023e8a", "line-width": 1.4, "line-opacity": 0.9 },
+        });
+      }
 
-      map.addLayer({
-        id: RPG_RO_LAYER_LINE,
-        type: "line",
-        source: RPG_RO_SOURCE_ID,
-        paint: { "line-color": "#023e8a", "line-width": 1.4, "line-opacity": 0.9 },
-      });
+      if (detachHandlersRef.current) return; // déjà posés par cette instance
 
       // Hover → popup identifiant
       const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
@@ -86,7 +98,7 @@ export default function RpgRomaniaFeature({
         const id = getRpgRomaniaId(f.properties) || "(sans ID)";
         hoverPopup
           .setLngLat([e.lngLat.lng, e.lngLat.lat])
-          .setHTML(`<div style="font:12px/1.3 system-ui"><strong>RPG RO — ${id}</strong></div>`)
+          .setHTML(rpgHoverPopupHtml(`RPG RO — ${id}`))
           .addTo(map);
         map.getCanvas().style.cursor = "pointer";
       };
@@ -108,17 +120,7 @@ export default function RpgRomaniaFeature({
         const id = getRpgRomaniaId(f.properties);
 
         const el = document.createElement("div");
-        el.innerHTML = `
-          <div style="font:12px/1.35 system-ui">
-            <div style="font-weight:600; margin-bottom:6px">RPG Roumanie — ${id || "(sans ID)"}</div>
-            <button id="btn-import-rpg-ro" style="
-              padding:6px 10px;border:1px solid #ddd;border-radius:8px;
-              background:#fff;cursor:pointer
-            ">
-              Importer cette parcelle
-            </button>
-          </div>
-        `;
+        el.innerHTML = rpgImportPopupHtml(`RPG Roumanie — ${id || "(sans ID)"}`, "btn-import-rpg-ro");
         const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true })
           .setLngLat([e.lngLat.lng, e.lngLat.lat])
           .setDOMContent(el)
@@ -156,6 +158,15 @@ export default function RpgRomaniaFeature({
       };
       map.on("click", RPG_RO_LAYER_FILL, onClick);
       map.on("click", RPG_RO_LAYER_LINE, onClick);
+
+      detachHandlersRef.current = () => {
+        hoverPopup.remove();
+        for (const layer of [RPG_RO_LAYER_FILL, RPG_RO_LAYER_LINE]) {
+          map.off("mousemove", layer, onMove);
+          map.off("mouseleave", layer, onLeave);
+          map.off("click", layer, onClick);
+        }
+      };
     };
 
     if (styleReady(map)) addAll();

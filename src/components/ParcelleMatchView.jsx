@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../services/maplibre";
 import {
   buildMatchSuggestions,
   computeFeatureSimilarity,
@@ -7,6 +7,7 @@ import {
   getFeatureLabel,
 } from "../utils/parcelleMatching";
 import { resolvePreviousDisplayValue } from "../domain/parcelles/fusion";
+import { parcellePopupHtml } from "../services/mapPopupHtml";
 import { toWgs84 } from "../utils/proj";
 import { useRasterLayers } from "../features/map/useRasterLayers";
 import {
@@ -173,14 +174,12 @@ function attachViewerInteractions({
     const culture = props.culture ? `Culture : ${props.culture}` : null;
     const precedentValue = resolvePreviousDisplayValue(props);
     const precedent = precedentValue ? `Précédent : ${precedentValue}` : null;
-    const content = [title, culture, precedent].filter(Boolean).join("<br />");
-    if (!content) return;
     if (popupRef.current) {
       popupRef.current.remove();
     }
     popupRef.current = new maplibregl.Popup({ closeButton: true })
       .setLngLat(event.lngLat)
-      .setHTML(`<div style="font-size:12px;">${content}</div>`)
+      .setHTML(parcellePopupHtml([title, culture, precedent]))
       .addTo(map);
   };
 

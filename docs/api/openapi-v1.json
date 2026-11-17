@@ -1,0 +1,1040 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "API Studio Parcellaire",
+    "version": "1.0.0",
+    "description": "Enrichissement sans état d'une parcelle à partir d'un point ou d'un contour, et lecture des données publiques (relief, RPG, BD TOPO) avec cache disque. Rien n'est écrit côté serveur, hormis ce cache. Une évolution incompatible du contrat passe par un nouveau préfixe (/api/v2)."
+  },
+  "servers": [{ "url": "http://localhost:4174", "description": "Serveur local" }],
+  "paths": {
+    "/api/v1/meteo": {
+      "get": {
+        "operationId": "lireMeteo",
+        "summary": "Météo journalière d'un point (Open-Meteo), complétée par les normales",
+        "description": "Températures minimale et maximale et pluie de chaque jour, de debut à fin inclus, sur la maille de 0,1° du point. Mesures (ERA5 / ERA5-Land) jusqu'à la veille, normales 2015-2024 au-delà ou pour un jour manquant. Réponses gardées en cache disque. Données Open-Meteo, licence CC BY 4.0.",
+        "parameters": [
+          {
+            "name": "lat",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90
+            }
+          },
+          {
+            "name": "lon",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180
+            }
+          },
+          {
+            "name": "debut",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2025-07-01"
+            },
+            "description": "Au plus tôt le 1950-01-01."
+          },
+          {
+            "name": "fin",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2026-11-30"
+            },
+            "description": "Au plus 800 jours après debut, et moins d'un an après aujourd'hui."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Série complète, un objet par jour.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SerieMeteo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide (code PARAMETRE_INVALIDE). Open-Meteo n'est pas appelé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Open-Meteo ne répond pas ou renvoie une réponse invalide (code METEO_INDISPONIBLE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/parcelles": {
+      "get": {
+        "operationId": "listerFichesParcelles",
+        "summary": "Fiches parcelles d'une campagne",
+        "description": "Une fiche par parcelle de l'année : nom, surface, culture, bio, Télépac et historique des cultures. Le parcellaire saisi fait foi ; le RPG complète les années sans saisie (source « rpg ») et signale les écarts (ecart_rpg). Une année RPG illisible ajoute un avertissement sans faire échouer la réponse. Lecture seule.",
+        "parameters": [
+          {
+            "name": "annee",
+            "in": "query",
+            "required": false,
+            "description": "Campagne du parcellaire. Par défaut, la plus récente présente.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "historique",
+            "in": "query",
+            "required": false,
+            "description": "Nombre d'années d'historique, année demandée comprise (1 à 7).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 7,
+              "default": 5
+            }
+          },
+          {
+            "name": "rpg",
+            "in": "query",
+            "required": false,
+            "description": "non : historique et bio tirés du seul parcellaire, sans appel au RPG (réponse en quelques dixièmes de seconde au lieu d'environ 2 s pour 30 parcelles sur 7 ans).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "oui",
+                "non"
+              ],
+              "default": "oui"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fiches de l'année.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FichesParcelles"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide, ou année absente du parcellaire (code PARAMETRE_INVALIDE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/parcelles/{id}": {
+      "get": {
+        "operationId": "lireFicheParcelle",
+        "summary": "Fiche d'une parcelle",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "annee",
+            "in": "query",
+            "required": false,
+            "description": "Campagne du parcellaire. Par défaut, la plus récente présente.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "historique",
+            "in": "query",
+            "required": false,
+            "description": "Nombre d'années d'historique, année demandée comprise (1 à 7).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 7,
+              "default": 5
+            }
+          },
+          {
+            "name": "rpg",
+            "in": "query",
+            "required": false,
+            "description": "non : historique et bio tirés du seul parcellaire, sans appel au RPG (réponse en quelques dixièmes de seconde au lieu d'environ 2 s pour 30 parcelles sur 7 ans).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "oui",
+                "non"
+              ],
+              "default": "oui"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "La fiche.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FicheParcelle"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide, ou année absente du parcellaire (code PARAMETRE_INVALIDE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Identifiant inconnu pour cette année (code PARCELLE_INCONNUE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/terrain": {
+      "get": {
+        "operationId": "lireTerrain",
+        "summary": "Grille d'altitude ou de hauteur",
+        "description": "Une valeur float32 petit-boutiste par point, ligne par ligne du nord au sud et d'ouest en est : largeur × hauteur × 4 octets. Une valeur hors de ]-500 ; 9000[ (-9999, -99999) signifie « pas de donnée ». Les grandes grilles se demandent par tuiles de 1024 × 1024 au plus.",
+        "parameters": [
+          {
+            "name": "couche",
+            "in": "query",
+            "required": true,
+            "description": "mnt-lidar : relief LiDAR HD ; mnh-lidar : hauteur de la végétation et du bâti LiDAR HD ; rge-alti : relief RGE ALTI ; srtm : relief mondial à 90 m.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "mnt-lidar",
+                "mnh-lidar",
+                "rge-alti",
+                "srtm"
+              ]
+            }
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "required": true,
+            "description": "Emprise ouest,sud,est,nord en degrés WGS 84 (longitude d'abord), au plus 0,25° de côté.",
+            "schema": {
+              "type": "string",
+              "example": "1.9025,42.9901,1.9257,43.0047"
+            }
+          },
+          {
+            "name": "largeur",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            }
+          },
+          {
+            "name": "hauteur",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grille binaire.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide (code PARAMETRE_INVALIDE). L'IGN n'est pas appelé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "La GéoPlateforme ne répond pas ou renvoie une réponse invalide (code IGN_INDISPONIBLE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/rpg": {
+      "get": {
+        "operationId": "lireRpg",
+        "summary": "Parcelles du RPG d'une campagne",
+        "parameters": [
+          {
+            "name": "annee",
+            "in": "query",
+            "required": true,
+            "description": "Millésime publié par l'IGN.",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                2025,
+                2024,
+                2023,
+                2022,
+                2021,
+                2020,
+                2019,
+                2018,
+                2017,
+                2016,
+                2015
+              ]
+            }
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "required": true,
+            "description": "Emprise ouest,sud,est,nord en degrés WGS 84 (longitude d'abord), au plus 0,25° de côté.",
+            "schema": {
+              "type": "string",
+              "example": "1.9025,42.9901,1.9257,43.0047"
+            }
+          },
+          {
+            "name": "max",
+            "in": "query",
+            "required": false,
+            "description": "Nombre maximal d'objets (1 à 5000, 5000 par défaut).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 5000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Objets trouvés. `tronque` vaut true si l'emprise en contient plus que `max`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionObjets"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide (code PARAMETRE_INVALIDE). L'IGN n'est pas appelé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "La GéoPlateforme ne répond pas ou renvoie une réponse invalide (code IGN_INDISPONIBLE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bdtopo": {
+      "get": {
+        "operationId": "lireBdtopo",
+        "summary": "Objets de la BD TOPO",
+        "parameters": [
+          {
+            "name": "couche",
+            "in": "query",
+            "required": true,
+            "description": "batiments, routes (tronçons), surfaces-eau (plans d'eau), cours-eau (tronçons hydrographiques), haies (lignes).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "batiments",
+                "routes",
+                "surfaces-eau",
+                "cours-eau",
+                "haies"
+              ]
+            }
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "required": true,
+            "description": "Emprise ouest,sud,est,nord en degrés WGS 84 (longitude d'abord), au plus 0,25° de côté.",
+            "schema": {
+              "type": "string",
+              "example": "1.9025,42.9901,1.9257,43.0047"
+            }
+          },
+          {
+            "name": "max",
+            "in": "query",
+            "required": false,
+            "description": "Nombre maximal d'objets (1 à 5000, 5000 par défaut).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "default": 5000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Objets trouvés. `tronque` vaut true si l'emprise en contient plus que `max`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionObjets"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Paramètre invalide (code PARAMETRE_INVALIDE). L'IGN n'est pas appelé.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "La GéoPlateforme ne répond pas ou renvoie une réponse invalide (code IGN_INDISPONIBLE).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enrich": {
+      "post": {
+        "operationId": "enrichParcelle",
+        "summary": "Enrichit une parcelle depuis le RPG et la toponymie",
+        "description": "Un point retient la parcelle RPG qui le contient. Un contour retient la parcelle RPG de plus grande intersection de surface, à condition qu'elle couvre au moins 20 % de la plus petite des deux surfaces. Le statut indique si une correspondance existe : une absence de parcelle n'est pas une erreur HTTP.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EnrichRequest" },
+              "examples": {
+                "point": {
+                  "value": { "geometry": { "type": "Point", "coordinates": [1.6, 48.2] }, "millesimes": [2025, 2024] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enrichissement réalisé. Lire `statut` et `cultures` : la réponse peut être partielle ou sans correspondance.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EnrichResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Corps invalide. Codes : JSON_INVALIDE, CORPS_INVALIDE, GEOMETRIE_INVALIDE, GEOMETRIE_TROP_ETENDUE, MILLESIMES_INVALIDES.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "403": {
+            "description": "Origine ou en-tête Host non autorisés.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "405": {
+            "description": "Méthode non prise en charge.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "413": {
+            "description": "Corps supérieur à 5 Mo.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "500": {
+            "description": "Erreur interne. Code : ERREUR_INTERNE.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "502": {
+            "description": "Aucun millésime interrogé n'a pu être lu : le WFS est en erreur. Code : WFS_INDISPONIBLE.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "504": {
+            "description": "Aucun millésime interrogé n'a répondu à temps. Code : WFS_TIMEOUT.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SerieMeteo": {
+        "type": "object",
+        "properties": {
+          "maille": {
+            "type": "object",
+            "description": "Centre de la maille de 0,1° où le point a été ramené.",
+            "properties": {
+              "lat": {
+                "type": "number"
+              },
+              "lon": {
+                "type": "number"
+              }
+            }
+          },
+          "altitude": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "fournisseur": {
+            "type": "string"
+          },
+          "licence": {
+            "type": "string"
+          },
+          "normales": {
+            "type": "string"
+          },
+          "jours": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "date",
+                "tmin",
+                "tmax",
+                "source"
+              ],
+              "properties": {
+                "date": {
+                  "type": "string",
+                  "format": "date",
+                  "description": "Jour civil du lieu."
+                },
+                "tmin": {
+                  "type": "number",
+                  "description": "°C à 2 m"
+                },
+                "tmax": {
+                  "type": "number",
+                  "description": "°C à 2 m"
+                },
+                "pluie": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "description": "mm"
+                },
+                "source": {
+                  "enum": [
+                    "observee",
+                    "normale"
+                  ],
+                  "description": "normale : moyenne 2015-2024 du jour, lissée sur 15 jours, faute de mesure."
+                }
+              }
+            }
+          }
+        }
+      },
+      "FichesParcelles": {
+        "type": "object",
+        "required": [
+          "type",
+          "annee",
+          "annees_disponibles",
+          "features"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "FeatureCollection"
+            ]
+          },
+          "annee": {
+            "type": "integer"
+          },
+          "annees_disponibles": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Années du parcellaire, la plus récente d'abord."
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FicheParcelle"
+            }
+          }
+        }
+      },
+      "FicheParcelle": {
+        "type": "object",
+        "required": [
+          "type",
+          "id",
+          "geometry",
+          "properties"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "Feature"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "geometry": {
+            "type": "object",
+            "nullable": true,
+            "description": "Contour saisi (CRS:84)."
+          },
+          "properties": {
+            "type": "object",
+            "required": [
+              "id",
+              "annee",
+              "nom",
+              "surface_ha",
+              "surface_source",
+              "culture",
+              "bio",
+              "type_bio",
+              "bio_source",
+              "telepac",
+              "historique",
+              "avertissements"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "annee": {
+                "type": "integer"
+              },
+              "nom": {
+                "type": "string",
+                "nullable": true
+              },
+              "surface_ha": {
+                "type": "number",
+                "nullable": true
+              },
+              "surface_source": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "saisie",
+                  "calculee",
+                  null
+                ],
+                "description": "saisie : surface enregistrée ; calculee : aire du contour."
+              },
+              "culture": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Code culture PAC ; null pour un texte libre saisi."
+                  },
+                  "precision": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "libelle": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "description": "Culture de l'année selon le parcellaire, null si non saisie."
+              },
+              "bio": {
+                "type": "boolean",
+                "nullable": true
+              },
+              "type_bio": {
+                "type": "string",
+                "nullable": true,
+                "description": "AB, CONV… quand bio vaut true."
+              },
+              "bio_source": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "parcellaire",
+                  "rpg",
+                  null
+                ]
+              },
+              "telepac": {
+                "type": "object",
+                "properties": {
+                  "pacage": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "ilot": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "numero": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "commune_insee": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                }
+              },
+              "historique": {
+                "type": "array",
+                "description": "Année demandée puis précédentes, de la plus récente à la plus ancienne.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "annee",
+                    "code",
+                    "precision",
+                    "libelle",
+                    "source"
+                  ],
+                  "properties": {
+                    "annee": {
+                      "type": "integer"
+                    },
+                    "code": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "precision": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "libelle": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "parcellaire",
+                        "rpg",
+                        "inconnue"
+                      ]
+                    },
+                    "ecart_rpg": {
+                      "type": "object",
+                      "description": "Présent quand le RPG déclare une autre culture que la saisie.",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "libelle": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "avertissements": {
+                "type": "array",
+                "description": "Codes : RPG_INDISPONIBLE, RPG_TRONQUE.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "CollectionObjets": {
+        "type": "object",
+        "required": [
+          "type",
+          "features",
+          "tronque"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "FeatureCollection"
+            ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Objets GeoJSON en CRS:84, propriétés telles que l'IGN les publie."
+          },
+          "tronque": {
+            "type": "boolean"
+          }
+        }
+      },
+      "EnrichRequest": {
+        "type": "object",
+        "required": ["geometry", "millesimes"],
+        "additionalProperties": false,
+        "properties": {
+          "geometry": {
+            "description": "Géométrie GeoJSON en [longitude, latitude] (WGS 84). L'emprise ne doit pas dépasser 0,1° de côté.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/GeoJsonPoint" },
+              { "$ref": "#/components/schemas/GeoJsonPolygon" },
+              { "$ref": "#/components/schemas/GeoJsonMultiPolygon" }
+            ]
+          },
+          "millesimes": {
+            "type": "array",
+            "description": "Années RPG demandées. Une année non publiée ressort avec le statut millesime_indisponible.",
+            "minItems": 1,
+            "maxItems": 15,
+            "items": { "type": "integer" }
+          },
+          "inclure_nom": {
+            "type": "boolean",
+            "default": true,
+            "description": "false évite la recherche du nom, et le téléchargement éventuel de la couche de toponymie."
+          }
+        }
+      },
+      "EnrichResponse": {
+        "type": "object",
+        "required": ["statut", "contour", "contour_millesime", "surface_ha", "nom", "cultures", "bio", "irrigable", "type_sol", "avertissements"],
+        "additionalProperties": false,
+        "properties": {
+          "statut": {
+            "type": "string",
+            "enum": ["ok", "partiel", "aucune_correspondance"],
+            "description": "ok : parcelle trouvée pour tous les millésimes. partiel : trouvée pour une partie seulement, ou au moins un millésime en erreur. aucune_correspondance : aucun millésime lu ne contient de parcelle correspondante."
+          },
+          "contour": {
+            "nullable": true,
+            "description": "Contour RPG du millésime trouvé le plus récent.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/GeoJsonPolygon" },
+              { "$ref": "#/components/schemas/GeoJsonMultiPolygon" }
+            ]
+          },
+          "contour_millesime": { "type": "integer", "nullable": true },
+          "surface_ha": {
+            "type": "number",
+            "nullable": true,
+            "description": "Surface RPG (surf_parc) du millésime trouvé le plus récent, ou surface calculée sur son contour. null sans correspondance."
+          },
+          "nom": {
+            "type": "string",
+            "nullable": true,
+            "description": "Toponyme le plus proche, suffixé « bordure » sous 0,15 ha. null si inclure_nom vaut false, hors couverture ou si la toponymie est indisponible (voir avertissements)."
+          },
+          "cultures": {
+            "type": "object",
+            "description": "Résultat par millésime demandé, indexé par l'année.",
+            "additionalProperties": { "$ref": "#/components/schemas/CultureMillesime" }
+          },
+          "bio": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Conduite biologique. Seul le schéma 2025 porte ce champ : null (inconnu) si aucun millésime trouvé ne le renseigne."
+          },
+          "irrigable": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Réservé : toujours null tant que la donnée n'est pas alimentée."
+          },
+          "type_sol": {
+            "type": "string",
+            "nullable": true,
+            "description": "Réservé : toujours null tant que la donnée n'est pas alimentée."
+          },
+          "avertissements": {
+            "type": "array",
+            "description": "Réserves sur le résultat. Codes : RPG_TRONQUE, INTERSECTION_PARTIELLE, TOPONYMIE_INDISPONIBLE.",
+            "items": {
+              "type": "object",
+              "required": ["code", "message"],
+              "additionalProperties": false,
+              "properties": {
+                "code": { "type": "string" },
+                "message": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "CultureMillesime": {
+        "type": "object",
+        "required": ["statut"],
+        "additionalProperties": false,
+        "description": "Les autres champs ne sont présents que selon le statut : `erreur` pour erreur_wfs, les champs de culture pour trouve.",
+        "properties": {
+          "statut": {
+            "type": "string",
+            "enum": ["trouve", "aucune_correspondance", "millesime_indisponible", "erreur_wfs"]
+          },
+          "code": { "type": "string", "nullable": true, "description": "Code culture RPG (code_cultu)." },
+          "groupe": { "type": "string", "nullable": true, "description": "Groupe de cultures (code_group)." },
+          "precision": { "type": "string", "nullable": true, "description": "Précision culture, publiée dans le schéma 2025." },
+          "surface_ha": { "type": "number", "nullable": true },
+          "id_parcelle": { "type": "string", "nullable": true, "description": "Identifiant RPG (id_parcel, ou num_parcel en 2025)." },
+          "recouvrement": {
+            "type": "number",
+            "nullable": true,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Part du contour fourni couverte par la parcelle RPG. null pour un point."
+          },
+          "erreur": {
+            "type": "string",
+            "enum": ["WFS_TIMEOUT", "WFS_HTTP", "WFS_RESEAU", "WFS_REPONSE_INVALIDE"]
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "code": { "type": "string" }
+        }
+      },
+      "GeoJsonPoint": {
+        "type": "object",
+        "required": ["type", "coordinates"],
+        "properties": {
+          "type": { "type": "string", "enum": ["Point"] },
+          "coordinates": { "type": "array", "minItems": 2, "items": { "type": "number" } }
+        }
+      },
+      "GeoJsonPolygon": {
+        "type": "object",
+        "required": ["type", "coordinates"],
+        "properties": {
+          "type": { "type": "string", "enum": ["Polygon"] },
+          "coordinates": {
+            "type": "array",
+            "items": { "type": "array", "minItems": 4, "items": { "type": "array", "minItems": 2, "items": { "type": "number" } } }
+          }
+        }
+      },
+      "GeoJsonMultiPolygon": {
+        "type": "object",
+        "required": ["type", "coordinates"],
+        "properties": {
+          "type": { "type": "string", "enum": ["MultiPolygon"] },
+          "coordinates": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": { "type": "array", "minItems": 4, "items": { "type": "array", "minItems": 2, "items": { "type": "number" } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

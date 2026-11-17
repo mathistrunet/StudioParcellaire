@@ -75,6 +75,7 @@ window.CODEBOOK_EXTRA = {
   "CEE": "Chênaie entretenue par des porcins ou des petits ruminants",
   "BTN": "Betterave",
   "CHV": "Chanvre",
+  "CSE": "Chanvre sans étiquette conforme",
   "CSA": "Canne à sucre",
   "HBL": "Houblon",
   "LIF": "Lin fibres",

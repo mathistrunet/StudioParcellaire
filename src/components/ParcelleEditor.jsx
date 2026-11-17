@@ -1,6 +1,5 @@
 // src/components/ParcelleEditor.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import centroid from "@turf/centroid";
 import {
   entriesCodebook,
   labelFromCode,
@@ -9,16 +8,26 @@ import {
   resolvePrecisionForCode,
 } from "../utils/cultureLabels";
 import { featureAreaM2 } from "../utils/geometry";
-import { fetchRpgGeoJSON, getCultureLabel, getMapBoundsCRS84 } from "../services/rpg";
-import { RPG_MIN_ZOOM } from "../Front/useRpgLayer";
+import { RPG_AVAILABLE_YEARS } from "../domain/rpg/rpgLayers.js";
+import { enrichParcelles } from "../services/enrich";
+import { fetchParcelSoilGrids, fetchParcelWrb } from "../services/soilgridsBackend";
+import { saveParcellesGeojson } from "../services/parcellesBackend";
+import ParcelSoilPanel from "./ParcelSoilPanel";
 import {
   CULTURE_COLUMNS,
   clearCulture,
+  getCultureColumn,
   hasCultureValue,
   readCulturePrecision,
   readCultureValue,
   setCulture,
 } from "../domain/parcelles/cultureColumns";
+import {
+  INTERCULTURE_COLUMNS,
+  readInterculture,
+  readIntercultureInput,
+  setInterculture,
+} from "../domain/parcelles/intercultures";
 
 
 
@@ -49,6 +58,8 @@ function readBioFlag(props = {}) {
 
 function setBioProps(props, bio) {
   const next = { ...props };
+  // Une saisie manuelle l'emporte : la case n'est plus le simple reflet du RPG.
+  delete next.bio_source;
   if (bio) {
     next.conduite_bio = true;
     next.isOrganic = true;
@@ -57,6 +68,33 @@ function setBioProps(props, bio) {
   } else {
     BIO_KEYS.forEach((key) => delete next[key]);
     delete next.organicType;
+  }
+  return next;
+}
+
+// Seul millésime du RPG publié avec un attribut `bio` à ce jour.
+const RPG_BIO_YEAR = 2025;
+const BIO_RPG_NOTES = {
+  oui: `Déclarée bio (RPG ${RPG_BIO_YEAR})`,
+  non: `Non déclarée (RPG ${RPG_BIO_YEAR})`,
+  inconnu: `Inconnu (RPG ${RPG_BIO_YEAR})`,
+};
+
+/**
+ * Applique le statut lu au RPG. Il reste déclaratif et ne dit ni AB ni conversion :
+ * aucun `organicType` n'est donc posé. « Non » ne retire qu'une coche venue du RPG :
+ * une saisie manuelle ou un import Télépac prime sur la couche publique.
+ */
+function applyBioFromRpg(props, statut) {
+  const next = { ...props, bio_rpg: statut };
+  if (statut === "oui" && !readBioFlag(props)) {
+    next.conduite_bio = true;
+    next.isOrganic = true;
+    next.parcelle_bio = "Oui";
+    next.bio_source = "RPG";
+  } else if (statut === "non" && props.bio_source === "RPG") {
+    BIO_KEYS.forEach((key) => delete next[key]);
+    delete next.bio_source;
   }
   return next;
 }
@@ -118,8 +156,6 @@ const buildEmptyTypedState = () =>
     return acc;
   }, {});
 
-const RPG_AVAILABLE_YEARS = [2024, 2023, 2022, 2021, 2020, 2019, 2018];
-
 /**
  * Année de campagne représentée par la colonne « Culture N ».
  *
@@ -144,89 +180,14 @@ const getRpgYearForColumn = (columnId, baseYear) => {
   return baseYear + column.offset;
 };
 
-function pointInRing(point, ring) {
-  if (!Array.isArray(point) || point.length < 2) return false;
-  if (!Array.isArray(ring) || ring.length < 4) return false;
-  const x = point[0];
-  const y = point[1];
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i]?.[0];
-    const yi = ring[i]?.[1];
-    const xj = ring[j]?.[0];
-    const yj = ring[j]?.[1];
-    if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) {
-      continue;
-    }
-    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
+const isSurfaceGeometry = (geometry) =>
+  geometry?.type === "Polygon" || geometry?.type === "MultiPolygon";
 
-function pointInPolygon(point, polygon) {
-  if (!Array.isArray(polygon) || polygon.length === 0) return false;
-  if (!pointInRing(point, polygon[0])) return false;
-  for (let i = 1; i < polygon.length; i += 1) {
-    if (pointInRing(point, polygon[i])) return false;
-  }
-  return true;
-}
-
-function pointInGeometry(point, geometry) {
-  if (!geometry) return false;
-  if (geometry.type === "Polygon") {
-    return pointInPolygon(point, geometry.coordinates);
-  }
-  if (geometry.type === "MultiPolygon") {
-    return geometry.coordinates?.some((poly) => pointInPolygon(point, poly));
-  }
-  return false;
-}
-
-function computeGeometryBbox(geometry) {
-  if (!geometry) return null;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-
-  const register = (coord) => {
-    if (!Array.isArray(coord) || coord.length < 2) return;
-    const x = coord[0];
-    const y = coord[1];
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-  };
-
-  const walkRing = (ring) => {
-    if (!Array.isArray(ring)) return;
-    ring.forEach(register);
-  };
-
-  const walkPolygon = (polygon) => {
-    if (!Array.isArray(polygon)) return;
-    polygon.forEach(walkRing);
-  };
-
-  if (geometry.type === "Polygon") {
-    walkPolygon(geometry.coordinates);
-  } else if (geometry.type === "MultiPolygon") {
-    geometry.coordinates?.forEach(walkPolygon);
-  }
-
-  if (!Number.isFinite(minX)) return null;
-  return [minX, minY, maxX, maxY];
-}
-
-function buildRpgIndex(features) {
-  if (!Array.isArray(features)) return [];
-  return features
-    .map((feature) => ({ feature, bbox: computeGeometryBbox(feature?.geometry) }))
-    .filter((item) => Array.isArray(item.bbox));
+/** Traduit un code RPG en code et précision du tableau de cultures. */
+function resolveRpgCulture(rpgCode) {
+  const split = splitCultureKey(rpgCode);
+  const code = split.code || rpgCode;
+  return { code, precision: resolvePrecisionForCode(code, split.precision) };
 }
 
 /**
@@ -238,7 +199,7 @@ function buildRpgIndex(features) {
  * à côté de la case de 13 px — sur le libellé ou la marge — cochait la case tout
  * en relançant la sélection, ce qui faisait clignoter la case.
  */
-function FlagCell({ cellStyle, checked, onToggle, label, title }) {
+function FlagCell({ cellStyle, checked, onToggle, label, title, note }) {
   return (
     <td style={cellStyle} onClick={(event) => event.stopPropagation()}>
       <label
@@ -259,6 +220,7 @@ function FlagCell({ cellStyle, checked, onToggle, label, title }) {
         />
         <span>{label}</span>
       </label>
+      {note ? <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.25 }}>{note}</div> : null}
     </td>
   );
 }
@@ -275,33 +237,86 @@ const FIXED_COLUMNS = [
   { id: "ilot", label: "Ilot.Parcelle", width: 120 },
   { id: "nom", label: "Nom", width: 190 },
   { id: "surface", label: "Surface (ha)", width: 95 },
-  { id: "bio", label: "Bio", width: 70 },
+  { id: "bio", label: "Bio", width: 110 },
   { id: "irrigable", label: "Irrigable", width: 85 },
 ];
 
+// Indice de confiance (probabilité de la classe WRB, en %) renvoyé par SoilGrids.
+// Format ISRIC : [["Cambisols", 30]] -> 30. Renvoie null si indisponible.
+function extractSoilConfidence(probability) {
+  if (Array.isArray(probability) && probability.length && Array.isArray(probability[0])) {
+    const pct = Number(probability[0][1]);
+    return Number.isFinite(pct) ? pct : null;
+  }
+  if (typeof probability === "number" && Number.isFinite(probability)) return probability;
+  return null;
+}
+
+// Petit badge en lecture seule affiché à côté du type de sol issu de SoilGrids.
+const confidenceBadgeStyle = {
+  flex: "0 0 auto",
+  border: "1px solid #d1d5db",
+  background: "#f3f4f6",
+  color: "#374151",
+  borderRadius: 6,
+  fontSize: 11,
+  lineHeight: 1,
+  padding: "2px 5px",
+  whiteSpace: "nowrap",
+};
+
 const SOIL_COLUMN = { id: "type_sol", label: "Type de sol", width: 160 };
+
+// Culture intermédiaire de chaque campagne (dérobée, CIPAN…), sur la même parcelle
+// que la culture de la même année : voir domain/parcelles/intercultures.js.
+const INTERCULTURE_TABLE_COLUMNS = INTERCULTURE_COLUMNS.map((col) => ({
+  id: col.id,
+  label: col.label,
+  width: 170,
+  cultureId: col.cultureId,
+}));
 
 /** Toutes les colonnes proposées au filtre, dans l'ordre d'affichage. */
 const ALL_COLUMNS = [
   ...FIXED_COLUMNS,
   ...CULTURE_COLUMNS.map((col) => ({ id: col.id, label: col.label, width: 150 })),
+  ...INTERCULTURE_TABLE_COLUMNS,
   SOIL_COLUMN,
   ...ADVANCED_COLUMNS.map((col) => ({ id: col.id, label: col.label, width: 150 })),
 ];
 
 // Colonnes masquées au premier affichage : les options avancées et les
 // millésimes les plus anciens, rarement renseignés, encombrent la saisie.
+// Intercultures visibles d'emblée : N, N-1 et N-2 ; les autres années restent
+// accessibles par le choix des colonnes.
+const DEFAULT_HIDDEN_INTERCULTURES = INTERCULTURE_TABLE_COLUMNS.filter(
+  (col) => !["current", "prev1", "prev2"].includes(col.cultureId)
+).map((col) => col.id);
+
 const DEFAULT_HIDDEN_COLUMNS = [
   ...ADVANCED_COLUMNS.map((col) => col.id),
   "prev5",
   "prev6",
+  ...DEFAULT_HIDDEN_INTERCULTURES,
 ];
 
-const HIDDEN_COLUMNS_KEY = "studioparcellaire.colonnes-masquees";
+// v2 : apparition des intercultures par année. Un réglage v1 est repris, en y
+// ajoutant les intercultures masquées par défaut, sinon les huit nouvelles
+// colonnes s'afficheraient d'un coup chez qui avait déjà réglé son tableau.
+const HIDDEN_COLUMNS_KEY = "studioparcellaire.colonnes-masquees.v2";
+const HIDDEN_COLUMNS_KEY_V1 = "studioparcellaire.colonnes-masquees";
 
 const COLUMN_HINTS = {
   bio: "Conduite en agriculture biologique",
   irrigable: "Parcelle irrigable — colonne « Irrigabilité » du CSV Assolia",
+  ...Object.fromEntries(
+    INTERCULTURE_TABLE_COLUMNS.map((col) => [
+      col.id,
+      col.cultureId === "current"
+        ? "Dérobée ou culture intermédiaire de la campagne N, sur la même parcelle que la culture N. Exportée en CIP_CULTU dans le shapefile ; absente du format CSV Assolia."
+        : `Dérobée ou culture intermédiaire de la même campagne que la « ${getCultureColumn(col.cultureId)?.label} ». Conservée dans l'outil, non exportée.`,
+    ])
+  ),
   prev5: "Conservée dans l'outil, non exportée vers le CSV Assolia",
   prev6: "Conservée dans l'outil, non exportée vers le CSV Assolia",
 };
@@ -323,6 +338,8 @@ const TableRow = React.memo(function TableRow({
   typedPrev4,
   typedPrev5,
   typedPrev6,
+  soilUpr,
+  onOpenSoilDetail,
   onSelect,
   onUpdateField,
   onUpdateCulture,
@@ -398,8 +415,9 @@ const TableRow = React.memo(function TableRow({
         <FlagCell
           cellStyle={cellStyle}
           checked={isBio}
-          label="AB"
-          title="Parcelle conduite en agriculture biologique"
+          label={props.bio_source === "RPG" ? "Bio" : "AB"}
+          title="Conduite en agriculture biologique. Le statut RPG reprend la déclaration PAC : ce n'est pas une certification."
+          note={BIO_RPG_NOTES[props.bio_rpg]}
           onToggle={(next) => onUpdateField(idKey, (p) => setBioProps(p, next))}
         />
       )}
@@ -423,17 +441,69 @@ const TableRow = React.memo(function TableRow({
           />
         </td>
       ))}
-      {affiche("type_sol") && (
-        <td style={cellStyle}>
+      {INTERCULTURE_TABLE_COLUMNS.filter((col) => affiche(col.id)).map((col) => (
+        <td key={col.id} style={cellStyle}>
           <input
-            value={props.type_sol ?? props.TYPE_SOL ?? ""}
+            list="cultures-col-current"
+            value={readIntercultureInput(props, col.cultureId)}
+            placeholder="—"
             onChange={(e) => {
               const val = e.target.value;
-              onUpdateField(idKey, (p) => ({ ...p, type_sol: val, TYPE_SOL: val }));
+              onUpdateField(idKey, (p) => setInterculture(p, val, col.cultureId));
             }}
             onClick={(e) => e.stopPropagation()}
             style={inputStyle}
           />
+        </td>
+      ))}
+      {affiche("type_sol") && (
+        <td style={cellStyle}>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <input
+              value={props.type_sol ?? props.TYPE_SOL ?? ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                // Une saisie manuelle invalide l'indice de confiance SoilGrids.
+                onUpdateField(idKey, (p) => {
+                  const next = { ...p, type_sol: val, TYPE_SOL: val };
+                  delete next.type_sol_confidence;
+                  return next;
+                });
+              }}
+              onClick={(e) => e.stopPropagation()}
+              style={inputStyle}
+            />
+            {props.type_sol_confidence != null ? (
+              <span
+                title="Indice de confiance SoilGrids (probabilité de la classe WRB). Disparaît si le type de sol est modifié."
+                style={confidenceBadgeStyle}
+              >
+                {props.type_sol_confidence}%
+              </span>
+            ) : null}
+            {soilUpr ? (
+              <button
+                type="button"
+                title="Voir les données SoilGrids ayant servi à déduire l'UPR"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenSoilDetail?.(idKey);
+                }}
+                style={{
+                  flex: "0 0 auto",
+                  border: "1px solid #c7d2fe",
+                  background: "#eef2ff",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  fontSize: 12,
+                  lineHeight: 1,
+                  padding: "2px 5px",
+                }}
+              >
+                ℹ️
+              </button>
+            ) : null}
+          </div>
         </td>
       )}
       {ADVANCED_COLUMNS.filter((col) => affiche(col.id)).map((col) => (
@@ -474,7 +544,6 @@ export default function ParcelleEditor({
   setFeatures,
   selectedId,
   onSelect,
-  mapRef,
   onFillNames,
   isFillingNames = false,
   millesimeAction = null,
@@ -483,12 +552,25 @@ export default function ParcelleEditor({
   const rowsRef = useRef(new Map());
   const [typed, setTyped] = useState(buildEmptyTypedState);
   const [isFillingRpg, setIsFillingRpg] = useState(false);
+  const [isFillingBio, setIsFillingBio] = useState(false);
+  // Remplissage UPR depuis SoilGrids
+  const [isFillingSoil, setIsFillingSoil] = useState(false);
+  const [soilFillProgress, setSoilFillProgress] = useState(null); // { done, total }
+  // Remplissage WRB-seul (nom de classe par parcelle) — plus léger, pour la Roumanie
+  const [isFillingWrb, setIsFillingWrb] = useState(false);
+  const [wrbFillProgress, setWrbFillProgress] = useState(null); // { done, total }
+  // Données SoilGrids/UPR conservées le temps de la session (idKey -> payload normalisé)
+  const [soilUprByIdKey, setSoilUprByIdKey] = useState({});
+  // Panneau latéral de consultation (idKey ouvert)
+  const [soilDetailIdKey, setSoilDetailIdKey] = useState(null);
   // Colonnes masquées, mémorisées d'une session à l'autre : chacun règle une
   // fois l'affichage qui lui convient.
   const [hiddenColumns, setHiddenColumns] = useState(() => {
     try {
       const brut = window.localStorage.getItem(HIDDEN_COLUMNS_KEY);
       if (brut) return JSON.parse(brut);
+      const ancien = window.localStorage.getItem(HIDDEN_COLUMNS_KEY_V1);
+      if (ancien) return [...new Set([...JSON.parse(ancien), ...DEFAULT_HIDDEN_INTERCULTURES])];
     } catch {
       /* stockage indisponible : on repart des colonnes par défaut */
     }
@@ -755,76 +837,151 @@ export default function ParcelleEditor({
       return;
     }
 
-    const map = mapRef?.current;
-    if (!map) {
-      alert("Carte indisponible pour consulter le RPG.");
-      return;
-    }
-    if (typeof map.getZoom === "function" && map.getZoom() < RPG_MIN_ZOOM) {
-      alert(`Zoome jusqu'a ${RPG_MIN_ZOOM} pour interroger le RPG.`);
+    // Le remplissage suit l'affichage du tableau : une parcelle masquée par un filtre
+    // ne doit pas être modifiée à l'insu de l'utilisateur. Il ne dépend pas de la carte.
+    const targets = features
+      .map((feature, index) => ({ feature, idKey: String(feature?.id ?? index) }))
+      .filter(({ feature, idKey }) => visibleIdKeys.has(idKey) && isSurfaceGeometry(feature?.geometry));
+    if (!targets.length) {
+      alert("Aucune parcelle avec un contour a remplir.");
       return;
     }
 
     setIsFillingRpg(true);
     try {
-      const bbox = getMapBoundsCRS84(map);
-      const gj = await fetchRpgGeoJSON(targetYear, bbox, 5000);
-      const rpgFeatures = Array.isArray(gj?.features) ? gj.features : [];
-      if (!rpgFeatures.length) {
-        alert(`Aucune parcelle RPG ${targetYear} n'a ete trouvee dans la zone affichee.`);
-        return;
+      const outcomes = await enrichParcelles(
+        targets.map(({ feature }) => feature.geometry),
+        // Le nom n'est pas utilisé ici : inutile de déclencher le chargement de la toponymie.
+        { millesimes: [targetYear], inclureNom: false }
+      );
+
+      const updates = new Map();
+      let errorCount = 0;
+      let noMatchCount = 0;
+      outcomes.forEach(({ result, error }, position) => {
+        const culture = result?.cultures?.[String(targetYear)];
+        if (error || culture?.statut === "erreur_wfs") {
+          errorCount += 1;
+        } else if (culture?.statut === "trouve" && culture.code) {
+          updates.set(targets[position].idKey, resolveRpgCulture(culture.code));
+        } else {
+          noMatchCount += 1;
+        }
+      });
+
+      if (updates.size) {
+        // La réponse peut prendre du temps : on repart de l'état courant pour ne pas
+        // écraser une saisie faite entre-temps.
+        setFeatures((prev) =>
+          (prev || []).map((feature, index) => {
+            const update = updates.get(String(feature?.id ?? index));
+            if (!update) return feature;
+            return {
+              ...feature,
+              properties: setCulture(feature.properties, column, update.code, update.precision),
+            };
+          })
+        );
+        setTyped((prev) => {
+          const next = { ...prev, [column.id]: { ...(prev[column.id] || {}) } };
+          updates.forEach((update, idKey) => {
+            next[column.id][idKey] = resolveCultureDisplay(
+              setCulture({}, column, update.code, update.precision),
+              column
+            );
+          });
+          return next;
+        });
       }
 
-      const rpgIndex = buildRpgIndex(rpgFeatures);
-      const nextFeatures = features.map((feature, index) => {
-        if (!feature?.geometry) return feature;
-        // Le remplissage suit l'affichage : une parcelle masquée par un filtre
-        // ne doit pas être modifiée à l'insu de l'utilisateur.
-        if (!visibleIdKeys.has(String(feature.id ?? index))) return feature;
-        const center = centroid(feature)?.geometry?.coordinates;
-        if (!center || !Array.isArray(center)) return feature;
-
-        const hitEntry = rpgIndex.find((entry) => {
-          const bboxEntry = entry.bbox;
-          if (!bboxEntry) return false;
-          const [minX, minY, maxX, maxY] = bboxEntry;
-          if (center[0] < minX || center[0] > maxX || center[1] < minY || center[1] > maxY) {
-            return false;
-          }
-          return pointInGeometry(center, entry.feature?.geometry);
-        });
-
-        if (!hitEntry) return feature;
-        const { label, code } = getCultureLabel(hitEntry.feature?.properties || {});
-        const resolvedKey = code || codeFromLabel(label) || label;
-        const split = splitCultureKey(resolvedKey);
-        const resolvedCode = split.code || resolvedKey;
-        if (!resolvedCode) return feature;
-
-        const resolvedPrecision = resolvePrecisionForCode(resolvedCode, split.precision);
-        return {
-          ...feature,
-          properties: setCulture(feature.properties, column, resolvedCode, resolvedPrecision),
-        };
-      });
-
-      setFeatures(nextFeatures);
-
-      setTyped((prev) => {
-        const next = { ...prev, [column.id]: { ...(prev[column.id] || {}) } };
-        nextFeatures.forEach((feature, idx) => {
-          const idKey = String(feature.id ?? idx);
-          const props = feature.properties || {};
-          if (!hasCultureValue(props, column)) return;
-          next[column.id][idKey] = resolveCultureDisplay(props, column);
-        });
-        return next;
-      });
+      if (errorCount === targets.length) {
+        alert("Le service RPG est indisponible. Reessaie dans quelques instants.");
+      } else if (errorCount > 0) {
+        alert(
+          `RPG ${targetYear} : ${updates.size} parcelle(s) remplie(s), ${noMatchCount} sans correspondance, ${errorCount} en erreur (a relancer).`
+        );
+      } else if (!updates.size) {
+        alert(`Aucune parcelle RPG ${targetYear} ne correspond a ces contours.`);
+      }
     } catch (error) {
       console.error("[RPG] Remplissage automatique echoue:", error);
       alert("Erreur lors du chargement RPG. Consulte la console pour le detail.");
     } finally {
       setIsFillingRpg(false);
+    }
+  };
+
+  const fillBioFromRpg = async () => {
+    const targets = features
+      .map((feature, index) => ({ feature, idKey: String(feature?.id ?? index) }))
+      .filter(({ feature, idKey }) => visibleIdKeys.has(idKey) && isSurfaceGeometry(feature?.geometry));
+    if (!targets.length) {
+      alert("Aucune parcelle avec un contour a remplir.");
+      return;
+    }
+
+    setIsFillingBio(true);
+    try {
+      const outcomes = await enrichParcelles(
+        targets.map(({ feature }) => feature.geometry),
+        { millesimes: [RPG_BIO_YEAR], inclureNom: false }
+      );
+
+      const statuts = new Map();
+      const counts = { oui: 0, non: 0, inconnu: 0, erreur: 0, conflit: 0, tropEtendu: 0 };
+      outcomes.forEach(({ result, error }, position) => {
+        // Refus définitif de l'API, pas une panne : relancer ne changerait rien.
+        if (error?.code === "GEOMETRIE_TROP_ETENDUE") {
+          counts.tropEtendu += 1;
+          return;
+        }
+        if (error || result?.cultures?.[String(RPG_BIO_YEAR)]?.statut === "erreur_wfs") {
+          counts.erreur += 1;
+          return;
+        }
+        // `null` : parcelle absente du RPG ou attribut manquant, ce n'est pas « non bio ».
+        const statut = result?.bio === true ? "oui" : result?.bio === false ? "non" : "inconnu";
+        counts[statut] += 1;
+        const { feature, idKey } = targets[position];
+        statuts.set(idKey, statut);
+        if (statut === "non" && readBioFlag(feature.properties) && feature.properties?.bio_source !== "RPG") {
+          counts.conflit += 1;
+        }
+      });
+
+      if (counts.erreur === targets.length) {
+        alert("Le service RPG est indisponible. Reessaie dans quelques instants.");
+        return;
+      }
+      setFeatures((prev) =>
+        (prev || []).map((feature, index) => {
+          const statut = statuts.get(String(feature?.id ?? index));
+          return statut ? { ...feature, properties: applyBioFromRpg(feature.properties, statut) } : feature;
+        })
+      );
+
+      const lignes = [
+        `RPG ${RPG_BIO_YEAR} : ${counts.oui} declaree(s) bio, ${counts.non} non declaree(s), ${counts.inconnu} inconnue(s).`,
+        "Statut declaratif : ni certification, ni distinction entre AB et conversion.",
+      ];
+      if (counts.conflit) {
+        lignes.push(`${counts.conflit} case(s) cochee(s) conservee(s) malgre un RPG sans bio : a verifier.`);
+      }
+      if (counts.oui) {
+        lignes.push("L'export Telepac n'indique pas ces parcelles en bio tant que la case n'est pas confirmee a la main.");
+      }
+      if (counts.tropEtendu) {
+        lignes.push(`${counts.tropEtendu} contour(s) trop etendu(s) pour une seule parcelle : non interroge(s).`);
+      }
+      if (counts.erreur) {
+        lignes.push(`${counts.erreur} parcelle(s) en erreur : a relancer.`);
+      }
+      alert(lignes.join("\n"));
+    } catch (error) {
+      console.error("[RPG] Remplissage du bio echoue:", error);
+      alert("Erreur lors du chargement RPG. Consulte la console pour le detail.");
+    } finally {
+      setIsFillingBio(false);
     }
   };
 
@@ -865,6 +1022,9 @@ export default function ParcelleEditor({
    */
   const moveCulturesOnProps = useCallback((props, srcDef, destDef) => {
     const srcValue = readCultureValue(props, srcDef);
+    // L'interculture suit la culture de son année : elle se déplace avec elle,
+    // selon les mêmes règles (source vide = destination intacte).
+    const srcInter = readInterculture(props, srcDef.id);
     let next = props;
 
     if (destDef && srcValue) {
@@ -873,9 +1033,16 @@ export default function ParcelleEditor({
         next = setCulture(next, destDef, srcValue, readCulturePrecision(props, srcDef));
       }
     }
+    if (destDef && srcInter) {
+      const destOccupied = readInterculture(next, destDef.id) !== "";
+      if (moveOverwriteDest || !destOccupied) {
+        next = setInterculture(next, srcInter, destDef.id);
+      }
+    }
 
     if (!moveKeepSource) {
       next = clearCulture(next, srcDef);
+      if (srcInter) next = setInterculture(next, "", srcDef.id);
     }
 
     return next;
@@ -891,7 +1058,9 @@ export default function ParcelleEditor({
       const props = feature?.properties || {};
       const next = moveCulturesOnProps(props, srcDef, destDef);
       const changed = CULTURE_COLUMNS.some(
-        (col) => readCultureValue(props, col) !== readCultureValue(next, col)
+        (col) =>
+          readCultureValue(props, col) !== readCultureValue(next, col) ||
+          readInterculture(props, col.id) !== readInterculture(next, col.id)
       );
       if (changed) touched += 1;
     });
@@ -1224,6 +1393,25 @@ export default function ParcelleEditor({
                         </button>
                       ) : null}
 
+                      {col.id === "bio" ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fillBioFromRpg();
+                          }}
+                          disabled={isFillingBio}
+                          title={`Lire la conduite bio déclarée au RPG ${RPG_BIO_YEAR} (ce n'est pas une certification)`}
+                          style={{
+                            ...headerButtonStyle,
+                            opacity: isFillingBio ? 0.6 : 1,
+                            cursor: isFillingBio ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          {isFillingBio ? "Remplissage..." : "Remplir"}
+                        </button>
+                      ) : null}
+
                       {cultureCol ? (
                         <button
                           type="button"
@@ -1243,9 +1431,49 @@ export default function ParcelleEditor({
                       ) : null}
 
                       {col.id === "type_sol" ? (
-                        <div style={{ fontWeight: 400, fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-                          Saisie libre
-                        </div>
+                        <>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          fillSoilTypeColumn();
+                        }}
+                        disabled={isFillingSoil}
+                        title="Déduire l'UPR de chaque parcelle depuis SoilGrids (texture, RU, WRB)"
+                        style={{
+                          ...headerButtonStyle,
+                          opacity: isFillingSoil ? 0.6 : 1,
+                          cursor: isFillingSoil ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {isFillingSoil
+                          ? soilFillProgress
+                            ? `Remplissage ${soilFillProgress.done}/${soilFillProgress.total}`
+                            : "Remplissage..."
+                          : "Remplir la colonne"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          fillWrbClassColumn();
+                        }}
+                        disabled={isFillingWrb || isFillingSoil}
+                        title="Remonter uniquement le nom de classe WRB par parcelle (plus léger, dédup par pixel)"
+                        style={{
+                          ...headerButtonStyle,
+                          marginTop: 4,
+                          opacity: isFillingWrb || isFillingSoil ? 0.6 : 1,
+                          cursor: isFillingWrb || isFillingSoil ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {isFillingWrb
+                          ? wrbFillProgress
+                            ? `WRB ${wrbFillProgress.done}/${wrbFillProgress.total}`
+                            : "Remplissage..."
+                          : "Remplir WRB"}
+                      </button>
+                        </>
                       ) : null}
                     </th>
                   );
@@ -1271,6 +1499,8 @@ export default function ParcelleEditor({
                     typedPrev4={typed.prev4?.[idKey] ?? ""}
                     typedPrev5={typed.prev5?.[idKey] ?? ""}
                     typedPrev6={typed.prev6?.[idKey] ?? ""}
+                    soilUpr={soilUprByIdKey[idKey]}
+                    onOpenSoilDetail={setSoilDetailIdKey}
                     onSelect={onSelect}
                     onUpdateField={updateFeatureByIdKey}
                     onUpdateCulture={updateCultureField}
@@ -1285,10 +1515,250 @@ export default function ParcelleEditor({
     );
   };
 
+  const resolveParcelId = (feature) =>
+    String(feature?.id ?? feature?.properties?.id ?? feature?.properties?.parcelleNo ?? "");
+
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Récupère l'UPR d'une parcelle avec relance sur rate-limit serveur. Le 429 est désormais
+  // attendu (requêtes parallèles) : on relance avec un backoff court et jitté pour étaler les
+  // reprises plutôt que de les faire converger en troupeau.
+  const fetchUprWithRetry = async (parcelId, attempt = 0) => {
+    try {
+      return await fetchParcelSoilGrids(parcelId);
+    } catch (error) {
+      if (attempt < 8 && /rate limit/i.test(error?.message || "")) {
+        await delay(1500 + Math.random() * 1500);
+        return fetchUprWithRetry(parcelId, attempt + 1);
+      }
+      throw error;
+    }
+  };
+
+  // Nombre de remontées SoilGrids menées en parallèle. Le serveur mutualise les requêtes d'un
+  // même pixel 250 m et ne compte que les vrais appels ISRIC dans son rate-limit (60/min), donc
+  // une concurrence modérée sature le débit utile sans déclencher de 429 sur les exploitations
+  // groupées (cas courant), tout en restant correcte pour les parcelles dispersées.
+  const SOIL_FILL_CONCURRENCY = 6;
+
+  const fillSoilTypeColumn = async () => {
+    if (!Array.isArray(features) || features.length === 0) {
+      alert("Aucune parcelle à analyser.");
+      return;
+    }
+    setIsFillingSoil(true);
+    setSoilFillProgress({ done: 0, total: features.length });
+    try {
+      // 1) Persister les parcelles côté serveur : l'endpoint SoilGrids les retrouve par id.
+      await saveParcellesGeojson(features);
+
+      let filled = 0;
+      let done = 0;
+      const errors = [];
+
+      // Traitement par un pool de workers concurrents : chacun pioche la parcelle suivante dans
+      // la file tant qu'il en reste. La déduplication par pixel est gérée côté serveur.
+      let nextIndex = 0;
+      const processOne = async (i) => {
+        const feature = features[i];
+        const idKey = String(feature.id ?? i);
+        const parcelId = resolveParcelId(feature);
+        if (parcelId) {
+          try {
+            const payload = await fetchUprWithRetry(parcelId);
+            const code = payload?.upr?.code;
+            const label = payload?.upr?.label;
+            if (code) {
+              const display = label ? `${code} — ${label}` : code;
+              const confidence = extractSoilConfidence(payload?.wrb?.probability);
+              // Remplissage progressif : la cellule et son ℹ️ apparaissent dès le calcul.
+              setSoilUprByIdKey((prev) => ({ ...prev, [idKey]: payload }));
+              setFeatures((prev) =>
+                (prev || []).map((feat, fi) => {
+                  if (String(feat.id ?? fi) !== idKey) return feat;
+                  const nextProps = { ...(feat.properties || {}), type_sol: display, TYPE_SOL: display };
+                  if (confidence != null) nextProps.type_sol_confidence = confidence;
+                  else delete nextProps.type_sol_confidence;
+                  return { ...feat, properties: nextProps };
+                })
+              );
+              filled += 1;
+            } else {
+              errors.push(parcelId);
+            }
+          } catch (error) {
+            console.warn(`[SOIL_FILL] Parcelle ${parcelId} échouée:`, error?.message || error);
+            errors.push(parcelId);
+          }
+        }
+        done += 1;
+        setSoilFillProgress({ done, total: features.length });
+      };
+
+      const worker = async () => {
+        while (nextIndex < features.length) {
+          const i = nextIndex;
+          nextIndex += 1;
+          await processOne(i);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(SOIL_FILL_CONCURRENCY, features.length) }, () => worker())
+      );
+
+      if (errors.length) {
+        alert(`${filled} parcelle(s) remplie(s). ${errors.length} sans donnée SoilGrids exploitable (point hors couverture ou identifiant manquant).`);
+      }
+    } catch (error) {
+      console.error("[SOIL_FILL] Échec global:", error);
+      alert("Erreur lors du remplissage des types de sol. Voir la console pour le détail.");
+    } finally {
+      setIsFillingSoil(false);
+      setSoilFillProgress(null);
+    }
+  };
+
+  const fetchWrbWithRetry = async (parcelId, attempt = 0) => {
+    try {
+      return await fetchParcelWrb(parcelId);
+    } catch (error) {
+      if (attempt < 8 && /rate limit/i.test(error?.message || "")) {
+        await delay(1500 + Math.random() * 1500);
+        return fetchWrbWithRetry(parcelId, attempt + 1);
+      }
+      throw error;
+    }
+  };
+
+  // Remontée WRB-seule : remplit la colonne « Type de sol » avec le nom de classe WRB de chaque
+  // parcelle. Beaucoup plus léger que l'UPR (un seul appel ISRIC par pixel, pas de profil ni de
+  // calcul) ; suffisant pour les rendez-vous en Roumanie. La classification est best-effort côté
+  // serveur (ne renvoie jamais d'erreur d'indisponibilité), donc pas de 504/500 en rafale ici.
+  const fillWrbClassColumn = async () => {
+    if (!Array.isArray(features) || features.length === 0) {
+      alert("Aucune parcelle à analyser.");
+      return;
+    }
+    setIsFillingWrb(true);
+    setWrbFillProgress({ done: 0, total: features.length });
+    try {
+      await saveParcellesGeojson(features);
+
+      let filled = 0;
+      let done = 0;
+      const noData = []; // réponse OK mais aucune classe WRB (hors couverture / domaine)
+      const failed = []; // échec réseau réel
+      let consecutiveFailures = 0;
+      let aborted = false;
+      const FAILURE_ABORT_THRESHOLD = 10;
+
+      let nextIndex = 0;
+      const processOne = async (i) => {
+        const feature = features[i];
+        const idKey = String(feature.id ?? i);
+        const parcelId = resolveParcelId(feature);
+        if (parcelId) {
+          try {
+            const payload = await fetchWrbWithRetry(parcelId);
+            consecutiveFailures = 0;
+            const wrb = payload?.wrbClassName;
+            if (wrb) {
+              const confidence = extractSoilConfidence(payload?.probability);
+              setFeatures((prev) =>
+                (prev || []).map((feat, fi) => {
+                  if (String(feat.id ?? fi) !== idKey) return feat;
+                  const nextProps = {
+                    ...(feat.properties || {}),
+                    type_sol: wrb,
+                    TYPE_SOL: wrb,
+                    wrb_class: wrb,
+                    WRB_CLASS: wrb,
+                  };
+                  if (confidence != null) nextProps.type_sol_confidence = confidence;
+                  else delete nextProps.type_sol_confidence;
+                  return { ...feat, properties: nextProps };
+                })
+              );
+              filled += 1;
+            } else {
+              noData.push(parcelId);
+            }
+          } catch (error) {
+            console.warn(`[WRB_FILL] Parcelle ${parcelId} échouée:`, error?.message || error);
+            failed.push(parcelId);
+            consecutiveFailures += 1;
+            if (consecutiveFailures >= FAILURE_ABORT_THRESHOLD) aborted = true;
+          }
+        }
+        done += 1;
+        setWrbFillProgress({ done, total: features.length });
+      };
+
+      const worker = async () => {
+        while (nextIndex < features.length && !aborted) {
+          const i = nextIndex;
+          nextIndex += 1;
+          await processOne(i);
+        }
+      };
+      // Concurrence modérée : la classification ISRIC est lente (~8 s) ; on évite de la saturer.
+      const WRB_FILL_CONCURRENCY = 4;
+      await Promise.all(
+        Array.from({ length: Math.min(WRB_FILL_CONCURRENCY, features.length) }, () => worker())
+      );
+
+      if (aborted) {
+        const remaining = features.length - done;
+        alert(
+          `Remontée WRB interrompue : SoilGrids ne répond pas (${failed.length} échecs consécutifs). ` +
+            `${filled} parcelle(s) remplie(s), ${remaining} non traitée(s). Réessaie plus tard.`
+        );
+      } else if (noData.length || failed.length) {
+        const parts = [];
+        if (noData.length) parts.push(`${noData.length} sans classe WRB (hors couverture)`);
+        if (failed.length) parts.push(`${failed.length} en échec`);
+        alert(`${filled} parcelle(s) remplie(s). ${parts.join(", ")}.`);
+      }
+    } catch (error) {
+      console.error("[WRB_FILL] Échec global:", error);
+      alert("Erreur lors de la remontée WRB. Voir la console pour le détail.");
+    } finally {
+      setIsFillingWrb(false);
+      setWrbFillProgress(null);
+    }
+  };
+
+  const soilDetailFeature = useMemo(() => {
+    if (soilDetailIdKey == null) return null;
+    const list = features || [];
+    for (let i = 0; i < list.length; i += 1) {
+      if (String(list[i].id ?? i) === String(soilDetailIdKey)) return list[i];
+    }
+    return null;
+  }, [soilDetailIdKey, features]);
+  const soilDetailPayload = soilDetailIdKey != null ? soilUprByIdKey[soilDetailIdKey] : null;
+
   return (
     <div style={{ marginTop: 12 }}>
       {renderTableView()}
       {renderMoveCulturesDialog()}
+      {soilDetailFeature && soilDetailPayload ? (
+        <ParcelSoilPanel
+          parcel={soilDetailFeature}
+          soilState={{ data: soilDetailPayload, loading: false, error: null, cacheHit: false }}
+          onClose={() => setSoilDetailIdKey(null)}
+          onRefresh={async () => {
+            const parcelId = resolveParcelId(soilDetailFeature);
+            if (!parcelId) return;
+            try {
+              const payload = await fetchParcelSoilGrids(parcelId, { refresh: true });
+              setSoilUprByIdKey((prev) => ({ ...prev, [soilDetailIdKey]: payload }));
+            } catch (error) {
+              console.warn("[SOIL_DETAIL] Rafraîchissement échoué:", error?.message || error);
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }

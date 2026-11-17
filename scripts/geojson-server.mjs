@@ -1,5 +1,5 @@
 import http from "node:http";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import {
   applyCorrespondencesAndMerge,
@@ -11,6 +11,7 @@ import {
   parseSoilGridsProperties,
 } from "../src/services/soilgrids.js";
 import { classifyParcelUpr } from "../src/services/uprClassification.js";
+import { TOPONYMIE_FILES } from "../src/domain/toponymie/regions.js";
 import { SoilGridsClient, SoilGridsError } from "./soilgrids/SoilGridsClient.mjs";
 import { SoilGridsCacheRepository } from "./soilgrids/SoilGridsCacheRepository.mjs";
 import { SoilGridsGridService } from "./soilgrids/SoilGridsGridService.mjs";
@@ -18,7 +19,27 @@ import { resolveParcelPoint } from "./soilgrids/geometry.mjs";
 import { soilGridsPixelKey } from "./soilgrids/homolosine.mjs";
 import { closeGeoPackageCache, queryGeoPackageByBbox } from "./geopackage-query.mjs";
 import { closeRpgRomaniaCache, queryRpgRomaniaByBbox } from "./rpg-romania-query.mjs";
+import {
+  DEFAULT_HOST,
+  DEFAULT_MAX_BODY_BYTES,
+  buildAccessPolicy,
+  getAccessDenial,
+  isLoopbackAddress,
+  prepareApiResponse,
+  readBody,
+  sendBodyError,
+} from "./http-security.mjs";
 import { ensureDatasetForBbox, ensureLayer } from "./layer-store.mjs";
+import { enrichParcelle } from "./enrich/enrich-service.mjs";
+import { createEnrichHandler } from "./enrich/enrich-route.mjs";
+import { createRpgWfsClient } from "./enrich/rpg-wfs-client.mjs";
+import { createToponymLookup } from "./enrich/toponym-lookup.mjs";
+import { creerCacheDisque } from "./donnees/cache-disque.mjs";
+import { creerLibelles } from "./donnees/cultures.mjs";
+import { creerServiceParcelles } from "./donnees/fiche-parcelle.mjs";
+import { creerClientGeoplateforme } from "./donnees/geoplateforme.mjs";
+import { creerClientMeteo } from "./donnees/meteo.mjs";
+import { creerRoutesDonnees } from "./donnees/routes.mjs";
 import {
   applyLayerUpdates,
   getLayerUpdateReport,
@@ -26,12 +47,17 @@ import {
 } from "./layer-updates.mjs";
 
 const PORT = Number(process.env.PORT || 4174);
+// Local par défaut. L'exposition réseau demande les deux options STUDIO_HOST et
+// STUDIO_ALLOWED_ORIGINS (cf. README) : le serveur n'a pas d'authentification.
+const HOST = process.env.STUDIO_HOST || DEFAULT_HOST;
+const ACCESS_POLICY = buildAccessPolicy({ port: PORT, extraOrigins: process.env.STUDIO_ALLOWED_ORIGINS });
+const MAX_BODY_BYTES = Number(process.env.STUDIO_MAX_BODY_BYTES) || DEFAULT_MAX_BODY_BYTES;
+// `data/` ne contient plus que les référentiels versionnés (et l'ancien parcellaire,
+// repris une seule fois) ; les données de l'utilisateur vivent dans APP_DATA_DIR.
 const DATA_DIR = path.resolve(process.cwd(), "data");
 // Application compilée : servie par ce même serveur quand elle existe, pour que le
 // lanceur n'ait qu'un seul processus à démarrer (pas de proxy /api à configurer).
 const DIST_DIR = path.resolve(process.cwd(), "dist");
-const DATA_FILE = path.join(DATA_DIR, "parcelles.geojson");
-const SOIL_MAPPING_FILE = path.join(DATA_DIR, "soil-type-mappings.json");
 const PUBLIC_DATA_DIR = path.resolve(process.cwd(), "public", "data");
 const SOILMAP_DEP_DIR = path.join(PUBLIC_DATA_DIR, "soilmap_dep");
 const TOPONYMIE_DIR = path.join(PUBLIC_DATA_DIR, "TOPONYMIE");
@@ -40,50 +66,70 @@ const POINT_STRATEGY = process.env.SOILGRIDS_POINT_STRATEGY || "centroid";
 const CALC_VERSION = "v1.6.0-upr";
 const WRB_CALC_VERSION = "wrb-v1";
 
+// Import dynamique : `node:sqlite` manque aux anciennes versions de Node, et le message
+// doit le dire au lieu d'une erreur de module. Sans base, mieux vaut ne pas démarrer que
+// laisser croire à un parcellaire vide.
+let parcelStore;
+let appDataDir;
+try {
+  const { openParcelStore, resolveAppDataDir } = await import("./storage/parcel-store.mjs");
+  appDataDir = resolveAppDataDir();
+  parcelStore = openParcelStore({
+    dataDir: appDataDir,
+    legacyDataDir: DATA_DIR,
+    onWarning: (message) => console.warn(`[STOCKAGE] ${message}`),
+  });
+} catch (error) {
+  console.error(
+    `[STOCKAGE] Base locale inaccessible : ${error?.message || error}\n` +
+      "Node.js 22.13 ou plus récent est requis (version LTS sur https://nodejs.org)."
+  );
+  process.exit(1);
+}
+
 const soilClient = new SoilGridsClient({ timeoutMs: 15_000, retries: 2 });
-const soilCacheRepository = new SoilGridsCacheRepository({ dataDir: DATA_DIR, ttlDays: 30 });
+const soilCacheRepository = new SoilGridsCacheRepository({ dataDir: appDataDir, ttlDays: 30 });
 // Cache léger dédié à la remontée WRB-seule (nom de classe par pixel), séparé du cache SoilGrids
 // complet pour éviter toute collision par parcel_id entre les deux modes.
-const wrbCacheRepository = new SoilGridsCacheRepository({ dataDir: DATA_DIR, ttlDays: 30, fileName: "parcel-wrb-cache.json" });
-const soilGridService = new SoilGridsGridService({ dataDir: DATA_DIR });
+const wrbCacheRepository = new SoilGridsCacheRepository({ dataDir: appDataDir, ttlDays: 30, fileName: "parcel-wrb-cache.json" });
+const soilGridService = new SoilGridsGridService({ dataDir: appDataDir });
 const inflightSoilRequests = new Map();
 const rateLimitWindow = [];
+// Un contour de parcelle tient largement dans cette limite, bien plus stricte que celle
+// d'un parcellaire complet : l'endpoint est sans état, rien ne justifie un gros corps.
+const ENRICH_MAX_BODY_BYTES = Math.min(MAX_BODY_BYTES, 5 * 1024 * 1024);
+const fetchRpgFeatures = createRpgWfsClient();
+const lookupToponym = createToponymLookup({ ensureLayer, queryGeoPackageByBbox });
+// API v1 : fiches parcelles et données publiques (relief, RPG, BD TOPO, météo), avec
+// cache disque des réponses de l'IGN et d'Open-Meteo à côté de la base.
+const clientGeoplateforme = creerClientGeoplateforme({
+  cache: creerCacheDisque({ dossier: path.join(appDataDir, "cache", "geoplateforme") }),
+});
+const routerDonnees = creerRoutesDonnees({
+  client: clientGeoplateforme,
+  parcelles: creerServiceParcelles({
+    lireParcellaire: () => readCollection(),
+    client: clientGeoplateforme,
+    libelleCulture: creerLibelles(),
+  }),
+  // Les URL de la météo changent chaque jour (la fin de la série est la veille) : une
+  // entrée n'est donc relue que le jour même, sauf les normales 2015-2024, qui ne
+  // changent jamais.
+  meteo: creerClientMeteo({
+    cache: creerCacheDisque({ dossier: path.join(appDataDir, "cache", "meteo"), dureeJours: 3650 }),
+  }),
+  signalerErreur: (error) => log("DONNEES_ERROR", { message: error?.message || String(error) }),
+});
 
 const emptyCollection = () => ({ type: "FeatureCollection", features: [] });
+const isFeatureCollection = (value) =>
+  value?.type === "FeatureCollection" && Array.isArray(value.features);
 const log = (type, payload) => console.info(`[${type}]`, JSON.stringify(payload));
-
-const TOPONYMIE_FILES = {
-  ARA: "TOPONYMIE_ARA.gpkg",
-  BFC: "TOPONYMIE_BFC.gpkg",
-  BRATAGNE: "TOPONYMIE_Bratagne.gpkg",
-  CENTRE: "TOPONYMIE_Centre.gpkg",
-  GEST: "TOPONYMIE_GEst.gpkg",
-  HDF: "TOPONYMIE_HDF.gpkg",
-  IDF: "TOPONYMIE_IDF.gpkg",
-  NAQUITAINE: "TOPONYMIE_NAquitaine.gpkg",
-  NORMANDIE: "TOPONYMIE_Normandie.gpkg",
-  OCCITANIE: "TOPONYMIE_Occitanie.gpkg",
-  PACA: "TOPONYMIE_PACA.gpkg",
-  PDL: "TOPONYMIE_PDL.gpkg",
-};
-
-async function ensureDataFile() {
-  await mkdir(DATA_DIR, { recursive: true });
-  try {
-    await readFile(DATA_FILE, "utf-8");
-  } catch {
-    await writeFile(DATA_FILE, JSON.stringify(emptyCollection(), null, 2));
-  }
-}
-
-async function ensureSoilMappingFile() {
-  await mkdir(DATA_DIR, { recursive: true });
-  try {
-    await readFile(SOIL_MAPPING_FILE, "utf-8");
-  } catch {
-    await writeFile(SOIL_MAPPING_FILE, JSON.stringify({ mappings: {} }, null, 2));
-  }
-}
+const handleEnrich = createEnrichHandler({
+  enrich: (request) => enrichParcelle(request, { fetchRpgFeatures, lookupToponym }),
+  maxBodyBytes: ENRICH_MAX_BODY_BYTES,
+  onError: (error) => log("ENRICH_ERROR", { code: error?.code, message: error?.message || String(error) }),
+});
 
 function normalizeSoilMappingsPayload(payload) {
   const source = payload && typeof payload === "object" ? payload : {};
@@ -128,38 +174,19 @@ function normalizeSoilMappingsPayload(payload) {
 }
 
 async function readSoilMappings() {
-  await ensureSoilMappingFile();
-  const raw = await readFile(SOIL_MAPPING_FILE, "utf-8");
-  try {
-    const parsed = JSON.parse(raw);
-    return normalizeSoilMappingsPayload(parsed);
-  } catch {
-    // ignore
-  }
-  return { mappings: {} };
+  return normalizeSoilMappingsPayload(parcelStore.readSoilMappings());
 }
 
 async function writeSoilMappings(payload) {
-  await ensureSoilMappingFile();
-  const normalized = normalizeSoilMappingsPayload(payload);
-  await writeFile(SOIL_MAPPING_FILE, JSON.stringify(normalized, null, 2));
+  parcelStore.writeSoilMappings(normalizeSoilMappingsPayload(payload));
 }
 
 async function readCollection() {
-  await ensureDataFile();
-  const raw = await readFile(DATA_FILE, "utf-8");
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && parsed.type === "FeatureCollection") return parsed;
-  } catch {
-    // ignore
-  }
-  return emptyCollection();
+  return parcelStore.readCollection();
 }
 
 async function writeCollection(collection) {
-  await ensureDataFile();
-  await writeFile(DATA_FILE, JSON.stringify(collection, null, 2));
+  parcelStore.writeCollection(collection);
 }
 
 const parseUrl = (requestUrl) => new URL(requestUrl, "http://localhost");
@@ -514,17 +541,23 @@ async function serveStatic(requestUrl, res) {
   return sendFile(indexPath, res);
 }
 
-const server = http.createServer(async (req, res) => {
+const handleRequest = async (req, res) => {
   if (!req.url) return void res.end();
+
+  const denial = getAccessDenial(req, ACCESS_POLICY);
+  if (denial) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: denial }));
+    return;
+  }
+
   const requestUrl = parseUrl(req.url);
 
+  if (requestUrl.pathname === "/api/v1/enrich") return handleEnrich(req, res);
+  if (await routerDonnees(req, res, requestUrl)) return;
+
   if (requestUrl.pathname.startsWith("/api/parcels/") && requestUrl.pathname.endsWith("/soilgrids")) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
     // Le rate-limit est appliqué plus bas, uniquement sur les vrais appels ISRIC : un cache-hit
     // ou une requête mutualisée par pixel ne consomme pas le budget (cf. loadSoilGridsForParcel).
 
@@ -553,12 +586,7 @@ const server = http.createServer(async (req, res) => {
 
   // Remontée WRB-seule (nom de classe par parcelle), dédup par pixel, un seul appel ISRIC.
   if (requestUrl.pathname.startsWith("/api/parcels/") && requestUrl.pathname.endsWith("/wrb")) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const match = requestUrl.pathname.match(/^\/api\/parcels\/([^/]+)\/wrb$/);
     const parcelId = match?.[1];
@@ -579,11 +607,7 @@ const server = http.createServer(async (req, res) => {
 
   // État des couches : y a-t-il une version plus récente publiée ?
   if (requestUrl.pathname === "/api/layers/updates") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
+    if (prepareApiResponse(req, res, ["GET", "POST"])) return;
 
     try {
       if (req.method === "GET") {
@@ -608,21 +632,12 @@ const server = http.createServer(async (req, res) => {
       // Une vérification impossible n'est pas une erreur pour l'utilisateur :
       // l'application continue de fonctionner avec ses couches actuelles.
       res.end(JSON.stringify({ checkedAt: null, outdated: [], added: [], offline: true }));
-      return;
     }
-
-    res.writeHead(405);
-    res.end(JSON.stringify({ error: "Method not allowed." }));
     return;
   }
 
   if (requestUrl.pathname === "/api/soilgrids/grid") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const bbox = parseBboxParam(requestUrl.searchParams.get("bbox"));
     const limit = parseIntegerParam(requestUrl.searchParams.get("limit"), 5000, 1, 20000);
@@ -645,12 +660,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (requestUrl.pathname === "/api/soil/department") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const code = String(requestUrl.searchParams.get("code") || "")
       .trim()
@@ -707,12 +717,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname === "/api/toponymie/points") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const region = String(requestUrl.searchParams.get("region") || "")
       .trim()
@@ -773,12 +778,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname === "/api/rpg-romania") {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
-    if (req.method !== "GET") return void res.writeHead(405).end(JSON.stringify({ error: "Method not allowed." }));
+    if (prepareApiResponse(req, res, ["GET"])) return;
 
     const bbox = parseBboxParam(requestUrl.searchParams.get("bbox"));
     const limit = parseIntegerParam(requestUrl.searchParams.get("limit"), 1000, 1, 1000);
@@ -814,100 +814,117 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (requestUrl.pathname.startsWith("/api/parcelles")) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,PUT,POST,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (requestUrl.pathname.startsWith("/api/parcelles/backups")) {
+    if (prepareApiResponse(req, res, ["GET", "POST"])) return;
+    const restoreMatch = requestUrl.pathname.match(/^\/api\/parcelles\/backups\/(\d+)\/restore$/);
+    if (restoreMatch && req.method === "POST") {
+      const restored = parcelStore.restoreBackup(Number(restoreMatch[1]));
+      res.writeHead(restored ? 200 : 404);
+      res.end(JSON.stringify(restored ?? { error: "Sauvegarde introuvable." }));
+      return;
+    }
+    if (requestUrl.pathname === "/api/parcelles/backups" && req.method === "GET") {
+      res.writeHead(200);
+      res.end(JSON.stringify({ backups: parcelStore.listBackups() }));
+      return;
+    }
+    if (requestUrl.pathname === "/api/parcelles/backups" && req.method === "POST") {
+      try {
+        const payload = JSON.parse(await readBody(req, MAX_BODY_BYTES));
+        const reason = String(payload?.reason || "").trim().slice(0, 40);
+        if (!reason || !isFeatureCollection(payload?.collection)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Sauvegarde invalide." }));
+          return;
+        }
+        const id = parcelStore.createBackup(payload.collection, reason);
+        res.writeHead(201);
+        res.end(JSON.stringify({ id }));
+      } catch (error) {
+        sendBodyError(req, res, error);
+      }
+      return;
+    }
+    res.writeHead(405);
+    res.end(JSON.stringify({ error: "Method not allowed." }));
+    return;
+  }
 
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
+  if (requestUrl.pathname.startsWith("/api/parcelles")) {
+    if (prepareApiResponse(req, res, ["GET", "PUT", "POST"])) return;
     if (req.method === "GET") return void res.writeHead(200).end(JSON.stringify(await readCollection()));
 
     if (requestUrl.pathname.startsWith("/api/parcelles/matching/validate") && req.method === "POST") {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", async () => {
-        try {
-          const payload = JSON.parse(body);
-          const oldYear = Number(payload?.oldYear);
-          const newYear = Number(payload?.newYear);
-          if (!Number.isFinite(oldYear) || !Number.isFinite(newYear)) {
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: "Invalid year payload." }));
-            return;
-          }
-          const matches = Array.isArray(payload?.matches) ? payload.matches : [];
-          const correspondancesValidated = {};
-          matches.forEach((match) => {
-            const oldId = match?.oldId ?? match?.oldKey ?? match?.old;
-            const newId = match?.newId ?? match?.newKey ?? match?.new;
-            if (oldId != null && newId != null) correspondancesValidated[String(oldId)] = String(newId);
-          });
-
-          const collection = await readCollection();
-          const parcellesByYear = buildParcellesByYearFromFeatures(
-            Array.isArray(collection?.features) ? collection.features : []
-          );
-          const { parcellesByYear: mergedParcellesByYear } = applyCorrespondencesAndMerge({
-            parcellesByYear,
-            oldYear,
-            newYear,
-            correspondancesValidated,
-            dropOldYear: true,
-          });
-          const oldCollection = mergedParcellesByYear?.[oldYear] || emptyCollection();
-          const newCollection = mergedParcellesByYear?.[newYear] || emptyCollection();
-          const otherFeatures = (collection?.features || []).filter((feature) => {
-            const year = Number(feature?.properties?.annee);
-            if (!Number.isFinite(year)) return true;
-            return year !== oldYear && year !== newYear;
-          });
-          const mergedCollection = {
-            type: "FeatureCollection",
-            features: [...otherFeatures, ...(oldCollection.features || []), ...(newCollection.features || [])],
-          };
-
-          await writeCollection(mergedCollection);
-          res.writeHead(200);
-          res.end(
-            JSON.stringify({
-              status: "ok",
-              collection: mergedCollection,
-              parcellesOldYear: oldCollection,
-              parcellesNewYear: newCollection,
-            })
-          );
-        } catch (error) {
+      try {
+        const payload = JSON.parse(await readBody(req, MAX_BODY_BYTES));
+        const oldYear = Number(payload?.oldYear);
+        const newYear = Number(payload?.newYear);
+        if (!Number.isFinite(oldYear) || !Number.isFinite(newYear)) {
           res.writeHead(400);
-          res.end(JSON.stringify({ error: error?.message || "Invalid JSON payload." }));
+          res.end(JSON.stringify({ error: "Invalid year payload." }));
+          return;
         }
-      });
+        const matches = Array.isArray(payload?.matches) ? payload.matches : [];
+        const correspondancesValidated = {};
+        matches.forEach((match) => {
+          const oldId = match?.oldId ?? match?.oldKey ?? match?.old;
+          const newId = match?.newId ?? match?.newKey ?? match?.new;
+          if (oldId != null && newId != null) correspondancesValidated[String(oldId)] = String(newId);
+        });
+
+        const collection = await readCollection();
+        const parcellesByYear = buildParcellesByYearFromFeatures(
+          Array.isArray(collection?.features) ? collection.features : []
+        );
+        const { parcellesByYear: mergedParcellesByYear } = applyCorrespondencesAndMerge({
+          parcellesByYear,
+          oldYear,
+          newYear,
+          correspondancesValidated,
+          dropOldYear: true,
+        });
+        const oldCollection = mergedParcellesByYear?.[oldYear] || emptyCollection();
+        const newCollection = mergedParcellesByYear?.[newYear] || emptyCollection();
+        const otherFeatures = (collection?.features || []).filter((feature) => {
+          const year = Number(feature?.properties?.annee);
+          if (!Number.isFinite(year)) return true;
+          return year !== oldYear && year !== newYear;
+        });
+        const mergedCollection = {
+          type: "FeatureCollection",
+          features: [...otherFeatures, ...(oldCollection.features || []), ...(newCollection.features || [])],
+        };
+
+        await writeCollection(mergedCollection);
+        res.writeHead(200);
+        res.end(
+          JSON.stringify({
+            status: "ok",
+            collection: mergedCollection,
+            parcellesOldYear: oldCollection,
+            parcellesNewYear: newCollection,
+          })
+        );
+      } catch (error) {
+        sendBodyError(req, res, error);
+      }
       return;
     }
 
     if (req.method === "PUT") {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", async () => {
-        try {
-          const parsed = JSON.parse(body);
-          if (!parsed || parsed.type !== "FeatureCollection") {
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: "Invalid FeatureCollection payload." }));
-            return;
-          }
-          await writeCollection(parsed);
-          res.writeHead(200);
-          res.end(JSON.stringify({ status: "ok" }));
-        } catch (error) {
+      try {
+        const parsed = JSON.parse(await readBody(req, MAX_BODY_BYTES));
+        if (!isFeatureCollection(parsed)) {
           res.writeHead(400);
-          res.end(JSON.stringify({ error: error?.message || "Invalid JSON payload." }));
+          res.end(JSON.stringify({ error: "Invalid FeatureCollection payload." }));
+          return;
         }
-      });
+        await writeCollection(parsed);
+        res.writeHead(200);
+        res.end(JSON.stringify({ status: "ok" }));
+      } catch (error) {
+        sendBodyError(req, res, error);
+      }
       return;
     }
 
@@ -917,34 +934,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (requestUrl.pathname.startsWith("/api/soil-type-mappings")) {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,PUT,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-    if (req.method === "OPTIONS") return void res.writeHead(204).end();
+    if (prepareApiResponse(req, res, ["GET", "PUT"])) return;
     if (req.method === "GET") return void res.writeHead(200).end(JSON.stringify(await readSoilMappings()));
-    if (req.method === "PUT") {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
-      });
-      req.on("end", async () => {
-        try {
-          const parsed = JSON.parse(body);
-          await writeSoilMappings(parsed);
-          res.writeHead(200);
-          res.end(JSON.stringify({ status: "ok" }));
-        } catch (error) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: error?.message || "Invalid JSON payload." }));
-        }
-      });
-      return;
+    try {
+      await writeSoilMappings(JSON.parse(await readBody(req, MAX_BODY_BYTES)));
+      res.writeHead(200);
+      res.end(JSON.stringify({ status: "ok" }));
+    } catch (error) {
+      sendBodyError(req, res, error);
     }
-
-    res.writeHead(405);
-    res.end(JSON.stringify({ error: "Method not allowed." }));
     return;
   }
 
@@ -963,10 +961,28 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404);
   res.end();
+};
+
+// Sans ce filet, une URL mal encodée (/data/%E0%A4%A) arrêtait tout le serveur.
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch((error) => {
+    const malformed = error instanceof URIError || error?.code === "ERR_INVALID_URL";
+    if (!malformed) log("REQUEST_ERROR", { url: req.url, message: error?.message || String(error) });
+    if (res.headersSent) return void res.destroy();
+    res.writeHead(malformed ? 400 : 500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: malformed ? "URL invalide." : "Erreur interne du serveur." }));
+  });
 });
 
-server.listen(PORT, () => {
-  console.log(`GeoJSON backend listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  if (isLoopbackAddress(HOST)) {
+    console.log(`GeoJSON backend listening on http://localhost:${PORT}`);
+  } else {
+    console.warn(
+      `[SECURITE] Serveur exposé sur le réseau (${HOST}:${PORT}), sans authentification. ` +
+        `Origines acceptées : ${[...ACCESS_POLICY.origins].join(", ")}`
+    );
+  }
   // Vérification des couches en tâche de fond : le résultat est prêt quand
   // l'interface le demande, et son échec n'empêche jamais le démarrage.
   scheduleStartupCheck();
@@ -975,5 +991,6 @@ server.listen(PORT, () => {
 process.on("exit", () => {
   closeGeoPackageCache();
   closeRpgRomaniaCache();
+  parcelStore.close();
 });
 

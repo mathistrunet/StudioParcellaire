@@ -41,3 +41,4 @@ FarmPotential.exe.obsolete
 data/parcelles.geojson
 data/parcel-soilgrids-cache.json
 data/parcel-wrb-cache.json
+data/soilgrids-grid-metadata.json

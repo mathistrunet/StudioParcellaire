@@ -1,118 +1,136 @@
-// @vitest-environment jsdom
-import { describe, expect, it, beforeEach, vi } from "vitest";
+// @vitest-environment node
+//
+// La base locale est la seule référence : le navigateur ne garde plus de copie, et
+// l'ancienne rejoint la base une fois, sans jamais écraser son contenu.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { fetchParcellesGeojson, saveParcellesGeojson } from "./parcellesBackend";
+
+const COPY_KEY = "studioparcellaire.parcelles-temp";
 const LEGACY_KEY = "parcelles.geojson";
-const CURRENT_KEY = "studioparcellaire.parcelles-temp";
-// Marqueur de version : sans lui, le module purge le brouillon local au premier
-// chargement (cette version démarre sans parcellaire enregistré).
 const VERSION_KEY = "studioparcellaire.parcelles-version";
-const VERSION = "2";
 
-const SAMPLE_COLLECTION = JSON.stringify({
+const collection = (...ids) => ({
   type: "FeatureCollection",
-  features: [
-    {
-      type: "Feature",
-      properties: { nom: "P1" },
-      geometry: {
-        type: "Polygon",
-        coordinates: [[[1, 44], [2, 44], [2, 45], [1, 44]]],
-      },
-    },
-  ],
+  features: ids.map((id) => ({ type: "Feature", id, properties: {}, geometry: null })),
 });
 
-// La purge et la migration s'exécutent au chargement du module : chaque test
-// prépare donc localStorage avant de ré-importer.
-describe("parcellesBackend — purge de première installation", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    vi.resetModules();
-  });
+function stubLocalStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  const storage = {
+    getItem: (key) => (values.has(key) ? values.get(key) : null),
+    setItem: vi.fn((key, value) => values.set(key, String(value))),
+    removeItem: (key) => values.delete(key),
+  };
+  vi.stubGlobal("window", { localStorage: storage });
+  return storage;
+}
 
-  it("efface le brouillon local hérité et pose le marqueur de version", async () => {
-    window.localStorage.setItem(CURRENT_KEY, SAMPLE_COLLECTION);
-    window.localStorage.setItem(LEGACY_KEY, SAMPLE_COLLECTION);
-    await import("./parcellesBackend");
-    expect(window.localStorage.getItem(CURRENT_KEY)).toBeNull();
-    expect(window.localStorage.getItem(LEGACY_KEY)).toBeNull();
-    expect(window.localStorage.getItem(VERSION_KEY)).toBe(VERSION);
+function stubServer(serverCollection, { failWrites = false } = {}) {
+  const fetchMock = vi.fn(async (url, init = {}) => {
+    if (init.method && failWrites) return new Response("{}", { status: 500 });
+    if (!init.method) return new Response(JSON.stringify(serverCollection), { status: 200 });
+    return new Response("{}", { status: 200 });
   });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
 
-  it("ne purge plus une fois le marqueur posé", async () => {
-    window.localStorage.setItem(VERSION_KEY, VERSION);
-    window.localStorage.setItem(CURRENT_KEY, SAMPLE_COLLECTION);
-    await import("./parcellesBackend");
-    expect(window.localStorage.getItem(CURRENT_KEY)).toBe(SAMPLE_COLLECTION);
-  });
-});
+const writes = (fetchMock) => fetchMock.mock.calls.filter(([, init]) => init?.method);
 
-describe("parcellesBackend — migration localStorage", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    // Installation déjà initialisée : la purge de première ouverture n'entre pas en jeu.
-    window.localStorage.setItem(VERSION_KEY, VERSION);
-    vi.resetModules();
-  });
+describe("parcellesBackend — base locale", () => {
+  beforeEach(() => vi.restoreAllMocks());
+  afterEach(() => vi.unstubAllGlobals());
 
-  it("migration : copie la clé legacy vers la nouvelle clé et supprime l'ancienne", async () => {
-    window.localStorage.setItem(LEGACY_KEY, SAMPLE_COLLECTION);
-    await import("./parcellesBackend");
-    expect(window.localStorage.getItem(CURRENT_KEY)).toBe(SAMPLE_COLLECTION);
-    expect(window.localStorage.getItem(LEGACY_KEY)).toBeNull();
-  });
+  it("lit le serveur et n'écrit rien sans copie du navigateur", async () => {
+    const storage = stubLocalStorage();
+    const fetchMock = stubServer(collection("base"));
 
-  it("migration : ne touche rien si la nouvelle clé existe déjà", async () => {
-    const existingData = JSON.stringify({ type: "FeatureCollection", features: [] });
-    window.localStorage.setItem(CURRENT_KEY, existingData);
-    window.localStorage.setItem(LEGACY_KEY, SAMPLE_COLLECTION);
-    await import("./parcellesBackend");
-    // La nouvelle clé reste intacte, l'ancienne n'est pas supprimée car la migration skip
-    expect(window.localStorage.getItem(CURRENT_KEY)).toBe(existingData);
-  });
-
-  it("migration : ne fait rien si aucune des deux clés n'existe", async () => {
-    await import("./parcellesBackend");
-    expect(window.localStorage.getItem(CURRENT_KEY)).toBeNull();
-    expect(window.localStorage.getItem(LEGACY_KEY)).toBeNull();
-  });
-
-  it("fetchParcellesGeojson : lit depuis la clé unifiée", async () => {
-    window.localStorage.setItem(CURRENT_KEY, SAMPLE_COLLECTION);
-    const { fetchParcellesGeojson } = await import("./parcellesBackend");
     const result = await fetchParcellesGeojson();
-    expect(result.type).toBe("FeatureCollection");
-    expect(result.features).toHaveLength(1);
-    expect(result.features[0].properties.nom).toBe("P1");
+
+    expect(result.features.map((f) => f.id)).toEqual(["base"]);
+    expect(writes(fetchMock)).toEqual([]);
+    expect(storage.setItem).not.toHaveBeenCalled();
   });
 
-  it("fetchParcellesGeojson : retourne les données de l'API quand localStorage est vide", async () => {
-    const emptyCollection = { type: "FeatureCollection", features: [] };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve(emptyCollection),
-    }));
-    const { fetchParcellesGeojson } = await import("./parcellesBackend");
+  it("n'utilise plus le navigateur comme solution de repli", async () => {
+    stubLocalStorage({ [COPY_KEY]: JSON.stringify(collection("copie")), [VERSION_KEY]: "2" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
+
+    await expect(fetchParcellesGeojson()).rejects.toThrow("PARCELLES_FETCH_BACKEND_500");
+  });
+
+  it("reprend un travail récent quand la base est vide, puis retire la copie", async () => {
+    const storage = stubLocalStorage({ [COPY_KEY]: JSON.stringify(collection("copie")), [VERSION_KEY]: "2" });
+    const fetchMock = stubServer(collection());
+
     const result = await fetchParcellesGeojson();
-    expect(result.type).toBe("FeatureCollection");
-    expect(result.features).toHaveLength(0);
-    vi.unstubAllGlobals();
+
+    expect(result.features.map((f) => f.id)).toEqual(["copie"]);
+    const [[url, init]] = writes(fetchMock);
+    expect(url).toBe("/api/parcelles");
+    expect(init.method).toBe("PUT");
+    expect(storage.getItem(COPY_KEY)).toBeNull();
+    expect(storage.getItem(VERSION_KEY)).toBeNull();
   });
 
-  it("fetchParcellesGeojson : lève une erreur si API et localStorage sont tous deux indisponibles", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("réseau indisponible")));
-    const { fetchParcellesGeojson } = await import("./parcellesBackend");
-    await expect(fetchParcellesGeojson()).rejects.toThrow("PARCELLES_FETCH_FAILED");
-    vi.unstubAllGlobals();
-  });
+  it("garde la base et sauvegarde une copie divergente", async () => {
+    const storage = stubLocalStorage({ [COPY_KEY]: JSON.stringify(collection("copie")), [VERSION_KEY]: "2" });
+    const fetchMock = stubServer(collection("base"));
 
-  it("fetchParcellesGeojson : retombe sur localStorage si l'API échoue", async () => {
-    window.localStorage.setItem(CURRENT_KEY, SAMPLE_COLLECTION);
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("réseau indisponible")));
-    const { fetchParcellesGeojson } = await import("./parcellesBackend");
     const result = await fetchParcellesGeojson();
-    expect(result.type).toBe("FeatureCollection");
-    expect(result.features).toHaveLength(1);
-    vi.unstubAllGlobals();
+
+    expect(result.features.map((f) => f.id)).toEqual(["base"]);
+    const [[url, init]] = writes(fetchMock);
+    expect(url).toBe("/api/parcelles/backups");
+    expect(JSON.parse(init.body).reason).toBe("copie-navigateur");
+    expect(storage.getItem(COPY_KEY)).toBeNull();
+  });
+
+  it("ne sauvegarde pas une copie identique à la base", async () => {
+    const storage = stubLocalStorage({ [COPY_KEY]: JSON.stringify(collection("a")), [VERSION_KEY]: "2" });
+    const fetchMock = stubServer(collection("a"));
+
+    await fetchParcellesGeojson();
+
+    expect(writes(fetchMock)).toEqual([]);
+    expect(storage.getItem(COPY_KEY)).toBeNull();
+  });
+
+  it("ne remet pas en service une copie antérieure au marqueur de version", async () => {
+    stubLocalStorage({ [LEGACY_KEY]: JSON.stringify(collection("ancienne")) });
+    const fetchMock = stubServer(collection());
+
+    const result = await fetchParcellesGeojson();
+
+    expect(result.features).toEqual([]);
+    expect(writes(fetchMock)[0][0]).toBe("/api/parcelles/backups");
+  });
+
+  it("conserve la copie si son envoi échoue, et charge quand même la base", async () => {
+    const storage = stubLocalStorage({ [COPY_KEY]: JSON.stringify(collection("copie")), [VERSION_KEY]: "2" });
+    stubServer(collection("base"), { failWrites: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await fetchParcellesGeojson();
+
+    expect(result.features.map((f) => f.id)).toEqual(["base"]);
+    expect(storage.getItem(COPY_KEY)).not.toBeNull();
+  });
+
+  it("n'écrit plus le parcellaire dans le navigateur à l'enregistrement", async () => {
+    const storage = stubLocalStorage();
+    stubServer(collection());
+
+    await saveParcellesGeojson(collection("a").features);
+
+    expect(storage.setItem).not.toHaveBeenCalled();
+  });
+
+  it("signale un enregistrement refusé par le serveur", async () => {
+    stubLocalStorage();
+    stubServer(collection(), { failWrites: true });
+
+    await expect(saveParcellesGeojson(collection("a").features)).rejects.toThrow("PARCELLES_SAVE_BACKEND_500");
   });
 });

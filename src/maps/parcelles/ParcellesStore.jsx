@@ -6,28 +6,6 @@ import { featureCollectionsEqual } from "../../utils/featureCollectionEquality";
 
 import { ParcellesContext } from "./ParcellesContext";
 const EMPTY_COLLECTION = { type: "FeatureCollection", features: [] };
-const LOCAL_STORAGE_KEY = "studioparcellaire.parcelles-temp";
-
-const readFromStorage = () => {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch (error) {
-    console.warn("[PARCELLES_TEMP_READ_FAILED] Lecture stockage local impossible.", error);
-    return null;
-  }
-};
-
-const writeToStorage = (payload) => {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
-  } catch (error) {
-    console.warn("[PARCELLES_TEMP_WRITE_FAILED] Écriture stockage local impossible.", error);
-  }
-};
 
 export function ParcellesProvider({ children, initialCollection }) {
   const [parcellesCollection, setParcellesCollectionState] = useState(() =>
@@ -39,7 +17,6 @@ export function ParcellesProvider({ children, initialCollection }) {
   const [error, setError] = useState(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState(null);
   const [isDirty, setIsDirty] = useState(false);
-  const [hydratedFromStorage, setHydratedFromStorage] = useState(false);
 
   const setCollectionState = useCallback((next, { dirty = true, trackHistory = true } = {}) => {
     setParcellesCollectionState((prev) => {
@@ -82,40 +59,21 @@ export function ParcellesProvider({ children, initialCollection }) {
       setLastUpdatedAt(Date.now());
       setIsDirty(false);
     } catch (err) {
+      // Une requête annulée (démontage, double effet en mode strict) n'est pas un échec,
+      // et celle qui la remplace est encore en cours : le chargement n'est pas terminé.
+      if (signal?.aborted) return;
       setError(err);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     if (initialCollection) return undefined;
-    const stored = readFromStorage();
-    if (stored) {
-      setParcellesCollectionState(normalizeParcellesCollection(stored));
-      setHistoryPast([]);
-      setHistoryFuture([]);
-      setLoading(false);
-      setHydratedFromStorage(true);
-    }
-    return undefined;
-  }, [initialCollection]);
-
-  useEffect(() => {
-    if (initialCollection) return undefined;
-    if (hydratedFromStorage) return undefined;
     const controller = new AbortController();
     refreshParcelles(controller.signal);
     return () => controller.abort();
-  }, [initialCollection, hydratedFromStorage, refreshParcelles]);
-
-  useEffect(() => {
-    if (!parcellesCollection) return undefined;
-    const timeout = setTimeout(() => {
-      writeToStorage(parcellesCollection);
-    }, 250);
-    return () => clearTimeout(timeout);
-  }, [parcellesCollection]);
+  }, [initialCollection, refreshParcelles]);
 
   const setFromTelepac = useCallback((next) => {
     setFeatureCollection(next);

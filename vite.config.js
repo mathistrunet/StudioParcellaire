@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -52,8 +53,15 @@ export default defineConfig({
   build: { copyPublicDir: false },
   server: {
     proxy: {
+      // Adresse explicite : le backend n'écoute que sur 127.0.0.1, alors que
+      // « localhost » peut se résoudre d'abord en ::1 sous Windows.
       "/api": {
-        target: "http://localhost:4174",
+        target: "http://127.0.0.1:4174",
+        changeOrigin: true,
+      },
+      // Référentiels et couches : le backend les télécharge à la demande.
+      "/data": {
+        target: "http://127.0.0.1:4174",
         changeOrigin: true,
       },
     },
@@ -67,6 +75,8 @@ export default defineConfig({
     include: ["polygon-clipping"],
   },
   test: {
+    // Les copies de travail des sessions Claude ne sont pas le projet à tester.
+    exclude: [...configDefaults.exclude, ".claude/**"],
     resolve: {
       alias: {
         "polygon-clipping": polygonClippingEsm,

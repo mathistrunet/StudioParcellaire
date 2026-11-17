@@ -1,7 +1,8 @@
 // useRpgLayer.jsx
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
+import maplibregl from "../services/maplibre";
 import { fetchRpgGeoJSON, getCultureLabel, getMapBoundsCRS84 } from "../services/rpg";
+import { rpgHoverPopupHtml, rpgImportPopupHtml } from "../services/mapPopupHtml";
 
 /** Constantes (exportées si besoin ailleurs) */
 export const RPG_MIN_ZOOM   = 12;
@@ -27,8 +28,8 @@ function styleReady(map) {
  * - mapRef: React.RefObject<maplibregl.Map>
  * - drawRef: React.RefObject<MapboxDraw>
  * - minZoom?: number (défaut: 12)
- * - years?: number[] (défaut: [2024..2018])
- * - defaultYear?: number (défaut: 2023)
+ * - years?: number[] (défaut: [2025..2015])
+ * - defaultYear?: number (défaut: 2025)
  * - debounceMs?: number (défaut: 400)
  * - colorMap?: Record<string,string> (override de window.CULTURE_COLORS)
  * - defaultColor?: string (override de window.DEFAULT_CULTURE_COLOR)
@@ -38,8 +39,8 @@ export default function RpgFeature({
   drawRef,
   minZoom     = RPG_MIN_ZOOM,
   // Millésimes réellement exposés par le WFS GEOPF (vérifiés un par un).
-  years       = [2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015],
-  defaultYear = 2023,
+  years       = [2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015],
+  defaultYear = 2025,
   debounceMs  = 400,
   colorMap,
   defaultColor,
@@ -58,6 +59,15 @@ export default function RpgFeature({
   useEffect(() => { yearRef.current = year; }, [year]);
   useEffect(() => { onImportedRef.current = onImported; }, [onImported]);
 
+  // Le composant est démonté à chaque changement d'onglet alors que la carte, elle,
+  // survit. Ses gestionnaires doivent partir avec lui : ils liraient sinon les refs
+  // de l'instance disparue, donc le millésime du premier affichage de l'onglet.
+  const detachHandlersRef = useRef(null);
+  useEffect(() => () => {
+    detachHandlersRef.current?.();
+    detachHandlersRef.current = null;
+  }, []);
+
   /** Expression MapLibre pour colorer selon le code culture */
   const buildFillColorExpr = useCallback(() => {
     const COLOR_MAP     = colorMap || (typeof window !== "undefined" ? window.CULTURE_COLORS : {}) || {};
@@ -69,6 +79,7 @@ export default function RpgFeature({
       ["to-string",
         ["coalesce",
           ["get","code"],
+          ["get","code_cultu"],
           ["get","CODE_CULTURE"],
           ["get","CODE_CULTU"],
           ["get","CULT_CODE"],
@@ -97,31 +108,33 @@ export default function RpgFeature({
 
     const addAll = () => {
       if (!styleReady(map)) return;
-      if (map.getSource(RPG_SOURCE_ID)) return; // déjà créé
+      if (!map.getSource(RPG_SOURCE_ID)) {
+        map.addSource(RPG_SOURCE_ID, {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
 
-      map.addSource(RPG_SOURCE_ID, {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-      });
+        map.addLayer({
+          id: RPG_LAYER_FILL,
+          type: "fill",
+          source: RPG_SOURCE_ID,
+          paint: {
+            "fill-color": (colorMap || (typeof window !== "undefined" && window.CULTURE_COLORS))
+              ? buildFillColorExpr()
+              : "#ff6b00",
+            "fill-opacity": 0.18,
+          },
+        });
 
-      map.addLayer({
-        id: RPG_LAYER_FILL,
-        type: "fill",
-        source: RPG_SOURCE_ID,
-        paint: {
-          "fill-color": (colorMap || (typeof window !== "undefined" && window.CULTURE_COLORS))
-            ? buildFillColorExpr()
-            : "#ff6b00",
-          "fill-opacity": 0.18,
-        },
-      });
+        map.addLayer({
+          id: RPG_LAYER_LINE,
+          type: "line",
+          source: RPG_SOURCE_ID,
+          paint: { "line-color": "#ff4d00", "line-width": 1.4, "line-opacity": 0.9 },
+        });
+      }
 
-      map.addLayer({
-        id: RPG_LAYER_LINE,
-        type: "line",
-        source: RPG_SOURCE_ID,
-        paint: { "line-color": "#ff4d00", "line-width": 1.4, "line-opacity": 0.9 },
-      });
+      if (detachHandlersRef.current) return; // déjà posés par cette instance
 
       // Hover → popup libellé
       const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
@@ -130,7 +143,7 @@ export default function RpgFeature({
         const { label } = getCultureLabel(f.properties);
         hoverPopup
           .setLngLat([e.lngLat.lng, e.lngLat.lat])
-          .setHTML(`<div style="font:12px/1.3 system-ui"><strong>${label}</strong></div>`)
+          .setHTML(rpgHoverPopupHtml(label))
           .addTo(map);
         map.getCanvas().style.cursor = "pointer";
       };
@@ -152,17 +165,7 @@ export default function RpgFeature({
         const { label, code } = getCultureLabel(f.properties);
 
         const el = document.createElement("div");
-        el.innerHTML = `
-          <div style="font:12px/1.35 system-ui">
-            <div style="font-weight:600; margin-bottom:6px">${label}</div>
-            <button id="btn-import-rpg" style="
-              padding:6px 10px;border:1px solid #ddd;border-radius:8px;
-              background:#fff;cursor:pointer
-            ">
-              Importer cette parcelle
-            </button>
-          </div>
-        `;
+        el.innerHTML = rpgImportPopupHtml(label, "btn-import-rpg");
         const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true })
           .setLngLat([e.lngLat.lng, e.lngLat.lat])
           .setDOMContent(el)
@@ -203,6 +206,15 @@ export default function RpgFeature({
       };
       map.on("click", RPG_LAYER_FILL, onClick);
       map.on("click", RPG_LAYER_LINE, onClick);
+
+      detachHandlersRef.current = () => {
+        hoverPopup.remove();
+        for (const layer of [RPG_LAYER_FILL, RPG_LAYER_LINE]) {
+          map.off("mousemove", layer, onMove);
+          map.off("mouseleave", layer, onLeave);
+          map.off("click", layer, onClick);
+        }
+      };
     };
 
     if (styleReady(map)) addAll();

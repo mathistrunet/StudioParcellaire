@@ -129,14 +129,14 @@ Notes :
 
 - l'export XML permet de choisir la colonne culture a utiliser
 - l'export CSV demande des informations de structure et d'exploitation
-- un export shapefile existe dans le code mais n'est pas expose comme export principal dans le menu courant
+- l'acceptation par Assolia du shapefile exporte (format Geofolia) reste a confirmer sur un vrai import
 
 ## 7. Donnees et persistance
 
 Persistance actuelle :
 
 - stockage local temporaire via `localStorage`
-- sauvegarde backend dans `data/parcelles.geojson`
+- sauvegarde dans `%APPDATA%StudioParcellaireparcellaire.db`
 - mappings de sols dans `data/soil-type-mappings.json`
 - cache SoilGrids dans `data/parcel-soilgrids-cache.json`
 
